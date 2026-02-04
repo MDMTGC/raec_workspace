@@ -1,0 +1,22 @@
+# Raec Configuration - Logic-First / Internet Architect 
+model:
+  name: raec:latest # Or the specific 32B/70B model you are using
+  device: cuda
+
+memory:
+  # Using a fresh DB to ensure the 'Sword' lore is truly gone
+  db_path: data/embeddings/raec_architecture_v1.db
+
+tools:
+  python_timeout: 60  # Increased for complex architectural tasks
+  max_api_fetch_chars: 10000 # Increased to allow for full doc reading
+
+planner:
+  max_steps: 10 # Allows for deeper recursive reasoning
+
+skills:
+  storage_path: skills/skill_db.json
+
+logs:
+  tasks: logs/tasks/
+  memory: logs/memory_snapshots/

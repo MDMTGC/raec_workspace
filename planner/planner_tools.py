@@ -176,61 +176,64 @@ class ToolEnabledPlanner:
             "You are a task planner with access to tools.",
             f"\n**USER TASK:**\n{task}",
         ]
-        
+
         if context:
             prompt_parts.append(f"\n**Context:**\n{json.dumps(context, indent=2)}")
-        
+
         if similar_experiences:
             prompt_parts.append("\n**Relevant Past Experiences:**")
             for exp in similar_experiences[:3]:
                 prompt_parts.append(f"- {exp['content'][:100]}")
-        
+
         prompt_parts.append(f"\n{tools_doc}")
-        
+
         prompt_parts.append('''
-\n**Instructions:**
-1. Break the task into clear, actionable steps.
-2. For each step that requires a tool, specify:
-   - TOOL: category.tool_name
-   - PARAMS: {"param_name": "value"} (use exact parameter names from tool signatures)
-3. Number steps sequentially (1, 2, 3...).
-4. If a step depends on another, add [DEPENDS: X].
+\n**CRITICAL INSTRUCTIONS:**
+1. ONLY use tools from the list above. Do NOT invent tools that don't exist.
+2. Every step with a tool MUST have PARAMS with ALL required arguments.
+3. Use $stepN to reference output from step N (e.g., $step1, $step2).
 
-Example Output Format:
-1. List directory contents
-   TOOL: file.list_directory
-   PARAMS: {"dirpath": "."}
+**Required Format - Follow EXACTLY:**
+1. [Description of step]
+   TOOL: category.tool_name
+   PARAMS: {"param1": "value1", "param2": "value2"}
 
-2. Read the input file [DEPENDS: 1]
-   TOOL: file.read_file
-   PARAMS: {"filepath": "input.txt"}
+2. [Description] [DEPENDS: 1]
+   TOOL: category.tool_name
+   PARAMS: {"param": "$step1"}
 
-3. Process the data [DEPENDS: 2]
-   TOOL: code.run_python
-   PARAMS: {"code": "result = data.upper()"}
+**Common Patterns:**
+- List files: TOOL: file.list_directory, PARAMS: {"dirpath": "."}
+- Read file: TOOL: file.read_file, PARAMS: {"filepath": "filename.py"}
+- Analyze code: TOOL: code.validate_python, PARAMS: {"code": "$step2"}
+- Run code: TOOL: code.run_python, PARAMS: {"code": "print('hello')"}
+- Count items: TOOL: data.count, PARAMS: {"data": "$step1"}
+- Filter list: TOOL: data.filter_list, PARAMS: {"data": "$step1", "condition": ".py"}
+
+**IMPORTANT:** If you cannot accomplish a step with available tools, describe it WITHOUT a TOOL line and the system will use LLM reasoning instead.
 
 Generate the plan now:
 ''')
-        
+
         return "\n".join(prompt_parts)
     
     def _parse_plan_with_tools(self, plan_text: str) -> List[PlanStep]:
         """Parse LLM output into steps with tool assignments"""
         steps = []
         lines = plan_text.strip().split('\n')
-        
+
         current_step_id = None
         current_desc = None
         current_tool_cat = None
         current_tool_name = None
         current_params = {}
         current_deps = []
-        
+
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
+
             # Match numbered steps
             step_match = re.match(r'^(\d+)[.)]\s*(.+)$', line)
             if step_match:
@@ -244,7 +247,7 @@ Generate the plan now:
                         tool_params=current_params,
                         dependencies=current_deps
                     ))
-                
+
                 # Start new step
                 current_step_id = int(step_match.group(1))
                 current_desc = step_match.group(2).strip()
@@ -252,20 +255,20 @@ Generate the plan now:
                 current_tool_name = None
                 current_params = {}
                 current_deps = []
-                
+
                 # Extract dependencies from description
                 dep_match = re.search(r'\[DEPENDS:\s*([\d,\s]+)\]', current_desc, re.IGNORECASE)
                 if dep_match:
                     dep_str = dep_match.group(1)
                     current_deps = [int(x.strip()) for x in dep_str.split(',') if x.strip().isdigit()]
                     current_desc = re.sub(r'\[DEPENDS:[^\]]+\]', '', current_desc, flags=re.IGNORECASE).strip()
-            
+
             # Match TOOL line
             tool_match = re.match(r'TOOL:\s*(\w+)\.(\w+)', line, re.IGNORECASE)
             if tool_match:
                 current_tool_cat = tool_match.group(1)
                 current_tool_name = tool_match.group(2)
-            
+
             # Match PARAMS line
             params_match = re.match(r'PARAMS:\s*(.+)', line, re.IGNORECASE)
             if params_match:
@@ -275,7 +278,7 @@ Generate the plan now:
                     current_params = eval(params_str)
                 except:
                     pass
-        
+
         # Save last step
         if current_step_id is not None:
             steps.append(PlanStep(
@@ -286,14 +289,80 @@ Generate the plan now:
                 tool_params=current_params,
                 dependencies=current_deps
             ))
-        
+
         # If parsing failed, create generic steps
         if not steps:
             for i, line in enumerate(lines, 1):
                 if re.match(r'^\d+[.)]', line):
                     steps.append(PlanStep(i, line.strip()))
-        
+
+        # Validate and repair steps
+        steps = self._validate_and_repair_steps(steps)
+
         return steps
+
+    def _validate_and_repair_steps(self, steps: List[PlanStep]) -> List[PlanStep]:
+        """
+        Validate tools exist and repair missing params where possible.
+        Removes invalid tools so LLM reasoning is used instead.
+        """
+        available_tools = set(self.tools.list_tools().keys())
+
+        for step in steps:
+            if step.tool_category and step.tool_name:
+                tool_key = f"{step.tool_category}.{step.tool_name}"
+
+                # Check if tool exists
+                if tool_key not in available_tools:
+                    print(f"   [!] Tool '{tool_key}' not found - will use LLM reasoning")
+                    step.tool_category = None
+                    step.tool_name = None
+                    step.tool_params = {}
+                    continue
+
+                # Repair missing params based on tool and description
+                if not step.tool_params:
+                    step.tool_params = self._infer_params(step, tool_key)
+
+        return steps
+
+    def _infer_params(self, step: PlanStep, tool_key: str) -> Dict[str, Any]:
+        """
+        Try to infer parameters from the step description and tool signature.
+        """
+        desc_lower = step.description.lower()
+        params = {}
+
+        # file.list_directory
+        if tool_key == "file.list_directory":
+            params["dirpath"] = "."
+
+        # file.read_file
+        elif tool_key == "file.read_file":
+            # Try to extract filename from description
+            file_match = re.search(r'[`"\']?(\w+\.\w+)[`"\']?', step.description)
+            if file_match:
+                params["filepath"] = file_match.group(1)
+
+        # code.validate_python or code.run_python
+        elif tool_key in ("code.validate_python", "code.run_python"):
+            # These need code from previous step - use placeholder
+            params["code"] = "$step_prev"
+
+        # data.count
+        elif tool_key == "data.count":
+            params["data"] = "$step_prev"
+
+        # data.filter_list
+        elif tool_key == "data.filter_list":
+            params["data"] = "$step_prev"
+            # Try to extract condition
+            if ".py" in desc_lower or "python" in desc_lower:
+                params["condition"] = ".py"
+            elif "filter" in desc_lower:
+                params["condition"] = ""
+
+        return params
     
     def _execute_plan_with_tools(
         self,
@@ -334,7 +403,9 @@ Generate the plan now:
                     tool_key = f"{step.tool_category}.{step.tool_name}"
 
                     # Resolve params - inject previous step results where needed
-                    resolved_params = self._resolve_params(step.tool_params, step_results)
+                    resolved_params = self._resolve_params(
+                        step.tool_params, step_results, step.step_id
+                    )
 
                     print(f"   Using tool: {tool_key}")
                     print(f"   Params: {resolved_params}")
@@ -393,54 +464,63 @@ Generate the plan now:
     def _resolve_params(
         self,
         params: Dict[str, Any],
-        step_results: Dict[int, str]
+        step_results: Dict[int, str],
+        current_step_id: int = None
     ) -> Dict[str, Any]:
         """
         Resolve parameter values, injecting previous step results where needed.
 
         Strategy:
-        - If param key suggests data input (data, input, list, items, content, text)
-          and value is a simple word, inject last result
-        - Explicit references like $step1 get resolved
-        - Concrete values (paths, expressions) pass through
+        - $stepN references get resolved to step N's output
+        - $step_prev references get resolved to the previous step's output
+        - Keys that suggest data input get last result if value is a placeholder
         """
         import re
 
-        if not params or not step_results:
+        if not params:
             return params
 
         resolved = {}
         last_result = list(step_results.values())[-1] if step_results else None
+        prev_step_id = current_step_id - 1 if current_step_id and current_step_id > 1 else None
 
         # Keys that typically need data from previous steps
         data_keys = {'data', 'input', 'list', 'items', 'content', 'text', 'numbers', 'code', 'source'}
 
         for key, value in params.items():
-            # If key suggests data input and value looks like a placeholder
-            if key.lower() in data_keys and isinstance(value, str):
-                # Check for angle bracket placeholders like <contents_of_file>
-                if re.match(r'^<[^>]+>$', value) and last_result:
-                    resolved[key] = self._extract_result_data(last_result)
-                    continue
-                # Simple word or placeholder = inject last result
-                if re.match(r'^[\w\s\[\]]+$', value) and last_result:
-                    # Try to extract actual data from ToolResult
-                    resolved[key] = self._extract_result_data(last_result)
-                    continue
-
             if isinstance(value, str):
-                lower_val = value.lower()
+                # Handle $step_prev
+                if '$step_prev' in value.lower():
+                    if last_result:
+                        resolved[key] = self._extract_result_data(last_result)
+                        continue
 
-                # Explicit step references
-                step_ref = re.search(r'\$?step[_\s]*(\d+)', lower_val)
+                # Handle $stepN references (e.g., $step1, $step2)
+                step_ref = re.search(r'\$step(\d+)', value, re.IGNORECASE)
                 if step_ref:
                     step_num = int(step_ref.group(1))
                     if step_num in step_results:
                         resolved[key] = self._extract_result_data(step_results[step_num])
                         continue
+                    # If referenced step doesn't exist yet, try last result
+                    elif last_result:
+                        resolved[key] = self._extract_result_data(last_result)
+                        continue
+
+                # Check for angle bracket placeholders like <contents_of_file>
+                if re.match(r'^<[^>]+>$', value) and last_result:
+                    resolved[key] = self._extract_result_data(last_result)
+                    continue
+
+                # If key suggests data input and value looks like a placeholder
+                if key.lower() in data_keys:
+                    # Simple word or placeholder = inject last result
+                    if re.match(r'^[\w\s\[\]]+$', value) and last_result:
+                        resolved[key] = self._extract_result_data(last_result)
+                        continue
 
                 # Placeholder patterns
-                if any(p in lower_val for p in ['[list', '[result', 'previous', 'filtered']):
+                if any(p in value.lower() for p in ['[list', '[result', 'previous', 'filtered']):
                     if last_result:
                         resolved[key] = self._extract_result_data(last_result)
                         continue

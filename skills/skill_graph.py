@@ -149,7 +149,7 @@ class SkillGraph:
         # Check if similar skill already exists
         similar = self._find_similar_skills(task_description, category)
         if similar:
-            print(f"⚠️  Similar skill already exists: {similar[0].name}")
+            print(f"[!] Similar skill already exists: {similar[0].name}")
             # Could merge or update instead of creating new
         
         # Create evidence from execution
@@ -186,8 +186,8 @@ class SkillGraph:
             'category': category.value
         })
         
-        print(f"🆕 Extracted new skill: {skill.name} (ID: {skill_id[:8]}...)")
-        print(f"   Status: CANDIDATE - needs verification")
+        print(f"[+] Extracted new skill: {skill.name} (ID: {skill_id[:8]}...)")
+        print(f"    Status: CANDIDATE - needs verification")
         
         self._save()
         return skill_id
@@ -214,7 +214,7 @@ class SkillGraph:
         
         skill = self.skills[skill_id]
         
-        print(f"🔍 Verifying skill: {skill.name}")
+        print(f"[?] Verifying skill: {skill.name}")
         print(f"   Running {len(test_cases)} test cases...")
         
         passed_tests = 0
@@ -242,9 +242,9 @@ class SkillGraph:
             
             if result['passed']:
                 passed_tests += 1
-                print("✓")
+                print("[OK]")
             else:
-                print("✗")
+                print("[X]")
         
         # Calculate overall pass rate
         pass_rate = passed_tests / len(test_cases)
@@ -253,11 +253,11 @@ class SkillGraph:
         if pass_rate >= 0.8:  # 80% pass threshold
             skill.status = SkillStatus.VERIFIED
             skill.confidence = pass_rate
-            print(f"\n   ✅ VERIFIED - Pass rate: {pass_rate:.1%}")
+            print(f"\n   [OK] VERIFIED - Pass rate: {pass_rate:.1%}")
         else:
             skill.status = SkillStatus.FAILED
             skill.confidence = pass_rate
-            print(f"\n   ❌ FAILED - Pass rate: {pass_rate:.1%} (need 80%)")
+            print(f"\n   [FAIL] FAILED - Pass rate: {pass_rate:.1%} (need 80%)")
         
         self._log_audit("skill_verified", {
             'skill_id': skill_id,
@@ -332,10 +332,10 @@ class SkillGraph:
                 best_score = score
                 best_match = skill
         
-        # Threshold for match
-        if best_score > 0.3:
+        # Threshold for match (lowered to allow partial matches)
+        if best_score >= 0.15:
             return best_match
-        
+
         return None
     
     def has_skill(self, task_description: str) -> bool:
@@ -359,7 +359,7 @@ class SkillGraph:
         skill = self.skills[skill_id]
         
         if skill.status != SkillStatus.VERIFIED:
-            print(f"⚠️  Warning: Using unverified skill {skill.name}")
+            print(f"[!] Warning: Using unverified skill {skill.name}")
         
         # Update usage stats
         skill.usage_count += 1
@@ -405,7 +405,7 @@ class SkillGraph:
         # If skill is performing poorly, deprecate it
         if skill.usage_count >= 10 and skill.success_rate < 0.5:
             skill.status = SkillStatus.DEPRECATED
-            print(f"⚠️  Skill {skill.name} deprecated due to low success rate ({skill.success_rate:.1%})")
+            print(f"[!] Skill {skill.name} deprecated due to low success rate ({skill.success_rate:.1%})")
         
         self._save()
     
@@ -535,7 +535,7 @@ class SkillGraph:
             with open(self.storage_path, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"⚠️  Failed to save skill graph: {e}")
+            print(f"[!] Failed to save skill graph: {e}")
     
     def _load(self):
         """Load skill graph from disk"""
@@ -550,8 +550,8 @@ class SkillGraph:
             self.skill_dependencies = data.get('dependencies', {})
             self.audit_log = data.get('audit_log', [])
             
-            print(f"✓ Loaded {len(self.skills)} skills from {self.storage_path}")
+            print(f"[OK] Loaded {len(self.skills)} skills from {self.storage_path}")
         except FileNotFoundError:
-            print(f"✓ Initialized new skill graph at {self.storage_path}")
+            print(f"[OK] Initialized new skill graph at {self.storage_path}")
         except Exception as e:
-            print(f"⚠️  Failed to load skill graph: {e}")
+            print(f"[!] Failed to load skill graph: {e}")

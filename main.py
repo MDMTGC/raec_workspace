@@ -19,14 +19,15 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# Core imports
-from raec_core.llm_interface import LLMInterface
-from planner.planner import Planner
+# Core imports - use swarm-enabled LLM interface
+from raec_core.model_swarm import LLMInterface, TaskType
+from planner.planner_tools import ToolEnabledPlanner as Planner
 from memory.memory_db import HierarchicalMemoryDB, MemoryType
 from skills.skill_graph import SkillGraph, SkillCategory, SkillStatus
 from tools.executor import ToolExecutor, ToolType
 from agents.orchestrator import MultiAgentOrchestrator, AgentRole
 from evaluators.logic_checker import LogicChecker, VerificationLevel
+from raec_core.core_rules import CoreRulesEngine
 
 
 class Raec:
@@ -41,7 +42,7 @@ class Raec:
     
     def __init__(self, config_path: str = "config.yaml"):
         print("\n" + "="*70)
-        print("🧠 INITIALIZING RAEC SYSTEM")
+        print("[R] INITIALIZING RAEC SYSTEM")
         print("="*70 + "\n")
         
         # Load configuration
@@ -51,54 +52,70 @@ class Raec:
         with open(full_config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        # Initialize LLM
-        print("⚙️  Initializing LLM interface...")
-        self.llm = LLMInterface(model=self.config['model']['name'])
-        print("   ✓ Connected to model:", self.config['model']['name'])
+        # Initialize LLM with swarm routing
+        print("[*]  Initializing LLM interface...")
+        swarm_config_path = os.path.join(base_dir, "config/swarm_config.json")
+        self.llm = LLMInterface(
+            model=self.config['model']['name'],
+            config_path=swarm_config_path if os.path.exists(swarm_config_path) else None,
+            use_swarm=True
+        )
+        print("   [OK] Connected to model:", self.config['model']['name'])
+        if self.llm.swarm:
+            print("   [OK] Model swarm enabled")
         
         # Initialize subsystems
         db_path = os.path.join(base_dir, self.config['memory']['db_path'])
         skill_path = os.path.join(base_dir, "skills/skill_db.json")
         
-        print("\n⚙️  Initializing subsystems...")
+        print("\n[*]  Initializing subsystems...")
         
         # Memory
         self.memory = HierarchicalMemoryDB(db_path=db_path)
-        print("   ✓ Hierarchical Memory initialized")
+        print("   [OK] Hierarchical Memory initialized")
         
         # Skills
         self.skills = SkillGraph(storage_path=skill_path)
-        print("   ✓ Skill Graph loaded")
+        print("   [OK] Skill Graph loaded")
         
         # Tools
         self.tools = ToolExecutor(
             python_timeout=self.config['tools'].get('python_timeout', 60)
         )
-        print("   ✓ Tool Executor ready")
+        print("   [OK] Tool Executor ready")
         
         # Multi-Agent Orchestrator
         self.orchestrator = MultiAgentOrchestrator(self.llm)
         self._initialize_agents()
-        print("   ✓ Multi-Agent Orchestrator configured")
+        print("   [OK] Multi-Agent Orchestrator configured")
         
         # Verification
         self.evaluator = LogicChecker(self.llm)
-        print("   ✓ Logic Checker enabled")
+        print("   [OK] Logic Checker enabled")
+
+        # Core Rules Engine (immutable constraint layer)
+        self.rules = CoreRulesEngine()
+        print("   [OK] Core Rules Engine active")
         
-        # Planner (integrates memory and skills)
+        # Planner (integrates memory, skills, and tools)
         self.planner = Planner(
             self.llm,
             self.memory,
             self.skills,
+            tools=self.tools,
             max_steps=self.config['planner'].get('max_steps', 10)
         )
-        print("   ✓ Planner initialized")
+        print("   [OK] Planner initialized")
         
         # System directive
         self.logic_directive = "You are a technical reasoning engine. Provide objective analysis."
-        
+
+        # Action tracking for rules engine
+        self._recent_actions = []
+        self._max_action_history = 100
+
         print("\n" + "="*70)
-        print("✅ RAEC SYSTEM ONLINE")
+        print("[OK] RAEC SYSTEM ONLINE")
         print("="*70 + "\n")
     
     def _initialize_agents(self):
@@ -172,10 +189,28 @@ Based on the execution data, provide a direct, concise response.
             Execution result dictionary
         """
         print(f"\n{'='*70}")
-        print(f"🎯 EXECUTING TASK (Mode: {mode})")
+        print(f"[o] EXECUTING TASK (Mode: {mode})")
         print(f"{'='*70}")
         print(f"Task: {task}\n")
-        
+
+        # Gate through core rules
+        allowed, modified_data, messages = self.rules.gate(
+            action_type='task_execution',
+            action_data={'task': task, 'mode': mode},
+            context={'recent_actions': getattr(self, '_recent_actions', [])}
+        )
+
+        if not allowed:
+            return {
+                'success': False,
+                'error': 'Blocked by core rules',
+                'messages': messages,
+                'task': task
+            }
+
+        for msg in messages:
+            print(f"[RULES] {msg}")
+
         if mode == "standard":
             return self._execute_standard(task, context)
         elif mode == "collaborative":
@@ -197,14 +232,14 @@ Based on the execution data, provide a direct, concise response.
         3. Verify results
         4. Extract skill if successful
         """
-        print("📋 MODE: Standard Execution\n")
+        print("[=] MODE: Standard Execution\n")
         
         # Check if we have a skill for this task
-        print("🔍 Checking skill graph...")
+        print("[?] Checking skill graph...")
         matching_skill = self.skills.query_skill(task)
         
         if matching_skill and matching_skill.status == SkillStatus.VERIFIED:
-            print(f"   ✓ Found verified skill: {matching_skill.name}")
+            print(f"   [OK] Found verified skill: {matching_skill.name}")
             print(f"   Confidence: {matching_skill.confidence:.1%}, Uses: {matching_skill.usage_count}\n")
             
             # Use the skill
@@ -235,7 +270,7 @@ Based on the execution data, provide a direct, concise response.
         plan_result = self.planner.run(task, context)
         
         # Verify results
-        print("\n🔍 Verifying execution results...")
+        print("\n[?] Verifying execution results...")
         passed, verification_results = self.evaluator.verify(
             output=plan_result,
             verification_levels=[VerificationLevel.LOGIC, VerificationLevel.OUTPUT],
@@ -243,12 +278,12 @@ Based on the execution data, provide a direct, concise response.
         )
         
         if passed:
-            print("   ✅ Verification passed\n")
+            print("   [OK] Verification passed\n")
             
             # Consider skill extraction
             self._consider_skill_extraction(task, plan_result, verification_results)
         else:
-            print("   ⚠️  Verification failed\n")
+            print("   [!]  Verification failed\n")
             for vr in verification_results:
                 if not vr.passed:
                     print(f"      - {vr.message}")
@@ -272,7 +307,7 @@ Based on the execution data, provide a direct, concise response.
         3. Critic agent reviews
         4. Revision cycles if needed
         """
-        print("📋 MODE: Collaborative Multi-Agent\n")
+        print("[=] MODE: Collaborative Multi-Agent\n")
         
         # Use multi-agent orchestrator
         workflow_result = self.orchestrator.execute_workflow(
@@ -310,10 +345,10 @@ Based on the execution data, provide a direct, concise response.
         3. Halt if verification fails
         4. Provide detailed trace
         """
-        print("📋 MODE: Incremental Execution with Verification\n")
+        print("[=] MODE: Incremental Execution with Verification\n")
         
         # Generate reasoning steps
-        print("⚙️  Generating reasoning steps...\n")
+        print("[*]  Generating reasoning steps...\n")
         prompt = f"""
 Break down the following task into clear reasoning steps:
 
@@ -374,7 +409,7 @@ Provide 5-7 numbered steps showing your reasoning process.
         if not result.get('success'):
             return
         
-        print("💡 Considering skill extraction...")
+        print("[!] Considering skill extraction...")
         
         # Extract solution pattern from plan steps
         steps = result.get('steps', [])
@@ -406,7 +441,7 @@ Provide 5-7 numbered steps showing your reasoning process.
             category=category
         )
         
-        print(f"   ✓ Skill extracted (ID: {skill_id[:8]}...)")
+        print(f"   [OK] Skill extracted (ID: {skill_id[:8]}...)")
         print(f"   Status: CANDIDATE - needs verification before reuse\n")
     
     def analyze_performance(self) -> Dict[str, Any]:
@@ -414,7 +449,7 @@ Provide 5-7 numbered steps showing your reasoning process.
         Comprehensive system performance analysis
         """
         print("\n" + "="*70)
-        print("📊 RAEC SYSTEM PERFORMANCE ANALYSIS")
+        print("[#] RAEC SYSTEM PERFORMANCE ANALYSIS")
         print("="*70 + "\n")
         
         # Memory stats
@@ -430,7 +465,7 @@ Provide 5-7 numbered steps showing your reasoning process.
             print(f"   {mem_type.capitalize()}: {count}")
         
         # Skill stats
-        print("\n🎯 Skill Graph:")
+        print("\n[o] Skill Graph:")
         skill_stats = self.skills.get_stats()
         print(f"   Total skills: {skill_stats['total_skills']}")
         print(f"   Verified: {skill_stats['verified_count']}")
@@ -443,7 +478,7 @@ Provide 5-7 numbered steps showing your reasoning process.
                 print(f"     {status}: {count}")
         
         # Tool stats
-        print("\n🔧 Tool System:")
+        print("\n[T] Tool System:")
         tool_stats = self.tools.get_tool_stats()
         print(f"   Total tools: {tool_stats['total_tools']}")
         print(f"   Verified: {tool_stats['verified']}")
@@ -452,7 +487,7 @@ Provide 5-7 numbered steps showing your reasoning process.
         print(f"   Avg success rate: {tool_stats['avg_success_rate']:.1%}")
         
         # Agent stats
-        print("\n🤖 Multi-Agent System:")
+        print("\n[R] Multi-Agent System:")
         agent_stats = self.orchestrator.get_agent_stats()
         print(f"   Total agents: {agent_stats['total_agents']}")
         print(f"   Messages processed: {agent_stats['total_messages_processed']}")
@@ -464,31 +499,45 @@ Provide 5-7 numbered steps showing your reasoning process.
                 print(f"     {role}: {count}")
         
         # Verification stats
-        print("\n✅ Verification System:")
+        print("\n[OK] Verification System:")
         verification_stats = self.evaluator.get_verification_stats()
         print(f"   Total verifications: {verification_stats['total_verifications']}")
         if verification_stats['total_verifications'] > 0:
             print(f"   Pass rate: {verification_stats['pass_rate']:.1%}")
         
         # Bottleneck detection
-        print("\n⚠️  Bottleneck Analysis:")
+        print("\n[!]  Bottleneck Analysis:")
         bottlenecks = self.tools.detect_bottlenecks(threshold_ms=500)
-        
+
+        # Swarm stats (if enabled)
+        swarm_stats = None
+        if self.llm.swarm:
+            print("\n[S] Model Swarm:")
+            swarm_stats = self.llm.get_swarm_stats()
+            if swarm_stats:
+                print(f"   Available models: {len(swarm_stats.get('available_models', []))}")
+                if swarm_stats.get('calls_by_model'):
+                    print("   Calls by model:")
+                    for model, count in swarm_stats['calls_by_model'].items():
+                        avg_lat = swarm_stats.get('avg_latency_by_model', {}).get(model, 0)
+                        print(f"     {model}: {count} calls ({avg_lat:.2f}s avg)")
+
         print("\n" + "="*70 + "\n")
-        
+
         return {
             'memory': memory_stats,
             'skills': skill_stats,
             'tools': tool_stats,
             'agents': agent_stats,
             'verification': verification_stats,
-            'bottlenecks': bottlenecks
+            'bottlenecks': bottlenecks,
+            'swarm': swarm_stats
         }
     
     def close(self):
         """Clean shutdown"""
         self.memory.close()
-        print("\n✓ Raec system shutdown complete")
+        print("\n[OK] Raec system shutdown complete")
 
 
 def main():
@@ -514,7 +563,7 @@ def main():
         raec.close()
         
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[FAIL] Error: {e}")
         import traceback
         traceback.print_exc()
 

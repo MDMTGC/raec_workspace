@@ -320,7 +320,7 @@ class MultiAgentOrchestrator:
     def register_agent(self, agent: Agent):
         """Add an agent to the orchestrator"""
         self.agents[agent.agent_id] = agent
-        print(f"✓ Registered agent: {agent.agent_id} (Role: {agent.role.value})")
+        print(f"[OK] Registered agent: {agent.agent_id} (Role: {agent.role.value})")
     
     def create_agent(
         self,
@@ -404,7 +404,7 @@ class MultiAgentOrchestrator:
             Workflow results
         """
         print(f"\n{'='*70}")
-        print(f"🤝 EXECUTING MULTI-AGENT WORKFLOW: {workflow_name}")
+        print(f"[&] EXECUTING MULTI-AGENT WORKFLOW: {workflow_name}")
         print(f"{'='*70}\n")
         print(f"Task: {initial_task}\n")
         
@@ -429,7 +429,7 @@ class MultiAgentOrchestrator:
         workflow_result['message_count'] = len(self.message_bus)
         
         print(f"\n{'='*70}")
-        print(f"✅ WORKFLOW COMPLETE")
+        print(f"[OK] WORKFLOW COMPLETE")
         print(f"{'='*70}")
         print(f"Duration: {workflow_result['duration']:.2f}s")
         print(f"Messages: {workflow_result['message_count']}")
@@ -452,7 +452,7 @@ class MultiAgentOrchestrator:
         results = {'steps': [], 'success': False}
         
         # Step 1: Planning
-        print("📋 Step 1: Planning")
+        print("[=] Step 1: Planning")
         plan_msg = Message.create(
             sender='orchestrator',
             receiver=planner.agent_id,
@@ -469,10 +469,10 @@ class MultiAgentOrchestrator:
         
         plan = plan_responses[-1].content
         results['steps'].append({'phase': 'planning', 'output': plan})
-        print(f"✓ Plan created\n")
+        print(f"[OK] Plan created\n")
         
         # Step 2: Execution
-        print("⚙️  Step 2: Execution")
+        print("[*]  Step 2: Execution")
         exec_msg = Message.create(
             sender='orchestrator',
             receiver=executor.agent_id,
@@ -488,7 +488,7 @@ class MultiAgentOrchestrator:
         
         execution_result = exec_responses[-1].content
         results['steps'].append({'phase': 'execution', 'output': execution_result})
-        print(f"✓ Execution complete\n")
+        print(f"[OK] Execution complete\n")
         
         # Step 3: Critique with possible revision
         max_revisions = 2
@@ -496,7 +496,7 @@ class MultiAgentOrchestrator:
         approved = False
         
         while not approved and revision_count < max_revisions:
-            print(f"🔍 Step 3: Critique (Iteration {revision_count + 1})")
+            print(f"[?] Step 3: Critique (Iteration {revision_count + 1})")
             
             critique_msg = Message.create(
                 sender='orchestrator',
@@ -517,14 +517,14 @@ class MultiAgentOrchestrator:
             
             if critique.message_type == MessageType.APPROVAL:
                 approved = True
-                print(f"✅ Approved\n")
+                print(f"[OK] Approved\n")
             else:
-                print(f"🔄 Revision requested\n")
+                print(f"[~] Revision requested\n")
                 revision_count += 1
                 
                 if revision_count < max_revisions:
                     # Send back to executor for revision
-                    print(f"⚙️  Revision {revision_count}")
+                    print(f"[*]  Revision {revision_count}")
                     revise_msg = Message.create(
                         sender='orchestrator',
                         receiver=executor.agent_id,
@@ -539,7 +539,7 @@ class MultiAgentOrchestrator:
                     if new_exec_responses:
                         execution_result = new_exec_responses[-1].content
                         results['steps'].append({'phase': f'revision_{revision_count}', 'output': execution_result})
-                        print(f"✓ Revision complete\n")
+                        print(f"[OK] Revision complete\n")
         
         results['success'] = approved
         results['final_output'] = execution_result

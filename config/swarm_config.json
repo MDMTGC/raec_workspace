@@ -1,0 +1,145 @@
+{
+  "model_map": {
+    "reasoning": "raec:latest",
+    "synthesis": "raec:latest",
+    "planning": "raec:latest",
+    "error_recovery": "raec:latest",
+
+    "code_generation": "raec:latest",
+    "code_analysis": "raec:latest",
+    "bug_detection": "raec:latest",
+    "code_review": "raec:latest",
+    "syntax_repair": "raec:latest",
+
+    "tool_selection": "raec:latest",
+    "param_generation": "raec:latest",
+    "routing": "raec:latest",
+    "intent_classification": "raec:latest",
+
+    "json_parsing": "raec:latest",
+    "data_transform": "raec:latest",
+    "extraction": "raec:latest",
+
+    "memory_digest": "raec:latest",
+    "log_compression": "raec:latest",
+    "history_summary": "raec:latest",
+    "context_curation": "raec:latest",
+
+    "default": "raec:latest"
+  },
+  "fallback_model": "raec:latest",
+
+  "architecture_2026_validated": {
+    "research_date": "February 5, 2026",
+    "description": "Modern agentic swarm architecture validated against 2026 benchmarks",
+
+    "key_findings": {
+      "finding_1": "Data quality > model size (Phi-3 proved 3.8B can match 12B+ with quality data)",
+      "finding_2": "2026 4B routinely outperforms 2023 13B",
+      "finding_3": "SSM/Mamba achieves 220K context in 24GB VRAM vs ~32K for transformers",
+      "finding_4": "Falcon-H1 hybrid (attention + Mamba-2) beats Qwen3-32B at half the size"
+    },
+
+    "tiers": {
+      "orchestrator": {
+        "size": "32B+",
+        "vram": "~20GB",
+        "role": "Complex reasoning, planning, synthesis",
+        "validated_models": [
+          "deepseek-r1:32b (current, strong reasoning)",
+          "qwen2.5:32b (strong general purpose)",
+          "falcon-h1:34b (NEW: hybrid, beats Qwen3-32B)"
+        ],
+        "task_types": ["reasoning", "synthesis", "planning", "error_recovery"]
+      },
+
+      "coder": {
+        "size": "4-7B",
+        "vram": "~4-6GB",
+        "role": "Code generation, analysis, bug detection",
+        "validated_models": [
+          "qwen2.5-coder:7b (BEST: competitive with GPT-4o on code)",
+          "deepseek-r1-distill-qwen:7b (good multi-step analysis)",
+          "codellama:7b (fallback)"
+        ],
+        "task_types": ["code_generation", "code_analysis", "bug_detection", "code_review"]
+      },
+
+      "ganglia": {
+        "size": "3-4B",
+        "vram": "~2GB",
+        "latency": "<50ms",
+        "role": "Routing, intent classification, simple tasks",
+        "note": "2026 3B models outperform 2023 7B models - confirmed by benchmarks",
+        "validated_models": [
+          "smollm3:3b (NEW: HuggingFace, native tool-calling, 64K context, outperforms Llama-3.2-3B)",
+          "qwen3:4b (Qwen3-4B-Instruct-2507: best fine-tuned, optimized non-thinking mode)",
+          "phi-4-mini (Microsoft: best reasoning-to-size ratio sub-7B)",
+          "llama3.2:3b (Meta: solid baseline, 40-60 tok/s on laptop GPU)"
+        ],
+        "task_types": ["tool_selection", "param_generation", "routing", "intent_classification", "json_parsing", "syntax_repair"]
+      },
+
+      "curator": {
+        "type": "SSM/Mamba (CRITICAL)",
+        "size": "3-7B",
+        "role": "Memory management with linear O(n) scaling",
+        "critical_notes": [
+          "DO NOT use transformers for memory - O(n^2) attention explodes on long logs",
+          "SSMs achieve 220K context in 24GB VRAM vs ~32K for transformers (same hardware)",
+          "Pure Mamba achieves 4-5x inference throughput vs same-size transformer",
+          "Falcon-H1 uses parallel hybrid (attention + Mamba-2 heads) for best of both"
+        ],
+        "validated_models": [
+          "falcon-mamba:7b (AVAILABLE ON OLLAMA: Hudson/falcon-mamba-instruct)",
+          "falcon-h1:3b (NEW: hybrid attention+Mamba, parallel architecture)",
+          "jamba:3b (AVAILABLE ON OLLAMA: sam860/jamba-reasoning:3b)"
+        ],
+        "task_types": ["memory_digest", "log_compression", "history_summary", "context_curation"]
+      }
+    },
+
+    "vram_budget_example": {
+      "gpu": "RTX 4090 (24GB)",
+      "allocation": {
+        "orchestrator_32B": "~19GB (quantized Q4)",
+        "ganglia_3B": "~2GB (fits in margin)",
+        "total": "~21GB (leaves headroom)"
+      }
+    }
+  },
+
+  "recommended_pulls": {
+    "priority_1_fast_routing": {
+      "description": "Immediate speed gains for tool selection/routing",
+      "commands": [
+        "ollama pull smollm3:3b",
+        "ollama pull qwen3:4b",
+        "ollama pull phi-4-mini"
+      ],
+      "expected_latency": "<50ms per call"
+    },
+    "priority_2_code_specialist": {
+      "description": "Code generation and analysis",
+      "commands": [
+        "ollama pull qwen2.5-coder:7b"
+      ],
+      "expected_latency": "~200-500ms per call"
+    },
+    "priority_3_memory_curator": {
+      "description": "Long-context memory curation with linear scaling",
+      "commands": [
+        "ollama pull Hudson/falcon-mamba-instruct",
+        "ollama pull sam860/jamba-reasoning:3b"
+      ],
+      "critical_note": "SSMs handle 220K tokens where transformers cap at 32K"
+    }
+  },
+
+  "benchmark_sources": [
+    "https://huggingface.co/blog/smollm3",
+    "https://arxiv.org/html/2507.22448v1 (Falcon-H1)",
+    "https://www.ai21.com/blog/announcing-jamba/",
+    "https://arxiv.org/html/2507.12442v2 (SSM long context)"
+  ]
+}

@@ -61,7 +61,7 @@ class Planner:
         Execute a task with planning and memory integration
         """
         print(f"\n{'='*70}")
-        print(f"🎯 TASK: {task}")
+        print(f"[o] TASK: {task}")
         print(f"{'='*70}\n")
         
         # Check for similar past tasks in memory
@@ -93,7 +93,7 @@ class Planner:
             # Import MemoryType here to avoid circular imports
             from memory.memory_db import MemoryType
             
-            print("🔍 Searching memory for similar past tasks...")
+            print("[?] Searching memory for similar past tasks...")
             similar = self.memory.query(
                 query_text=task,
                 memory_types=[MemoryType.EXPERIENCE, MemoryType.SUMMARY],
@@ -102,13 +102,13 @@ class Planner:
             )
             
             if similar:
-                print(f"   ✓ Found {len(similar)} relevant past experiences\n")
+                print(f"   [OK] Found {len(similar)} relevant past experiences\n")
             else:
                 print("   • No similar past experiences found\n")
             
             return similar
         except Exception as e:
-            print(f"   ⚠ Memory query failed: {e}\n")
+            print(f"   [!] Memory query failed: {e}\n")
             return []
     
     def _generate_plan(
@@ -118,7 +118,7 @@ class Planner:
         context: Optional[Dict]
     ) -> List[PlanStep]:
         """Generate a multi-step plan using LLM"""
-        print("📋 Generating execution plan...\n")
+        print("[=] Generating execution plan...\n")
         
         # Build prompt with memory augmentation
         prompt = self._build_planning_prompt(task, similar_experiences, context)
@@ -130,7 +130,7 @@ class Planner:
             # Parse plan into structured steps
             steps = self._parse_plan(plan_text)
             
-            print(f"✓ Generated plan with {len(steps)} steps:\n")
+            print(f"[OK] Generated plan with {len(steps)} steps:\n")
             for step in steps:
                 deps = f" (depends on: {step.dependencies})" if step.dependencies else ""
                 print(f"   {step.step_id}. {step.description}{deps}")
@@ -139,7 +139,7 @@ class Planner:
             return steps
             
         except Exception as e:
-            print(f"⚠ Plan generation failed: {e}")
+            print(f"[!] Plan generation failed: {e}")
             # Fallback to simple single-step plan
             return [PlanStep(1, f"Complete task: {task}")]
     
@@ -218,7 +218,7 @@ Generate the plan now:
     
     def _execute_plan(self, steps: List[PlanStep], task: str) -> Dict[str, Any]:
         """Execute plan steps with dependency resolution"""
-        print("⚙️  EXECUTING PLAN\n")
+        print("[*]  EXECUTING PLAN\n")
         print(f"{'='*70}\n")
         
         completed_steps = set()
@@ -239,11 +239,11 @@ Generate the plan now:
                     'status': 'blocked',
                     'reason': f"Waiting for steps: {[d for d in step.dependencies if d not in completed_steps]}"
                 })
-                print(f"⏸️  Step {step.step_id}: BLOCKED (dependencies not met)")
+                print(f"[||]  Step {step.step_id}: BLOCKED (dependencies not met)")
                 continue
             
             # Execute step
-            print(f"▶️  Step {step.step_id}: {step.description}")
+            print(f"[>]  Step {step.step_id}: {step.description}")
             step.status = PlanStatus.IN_PROGRESS
             step.start_time = time.time()
             
@@ -262,7 +262,7 @@ Generate the plan now:
                     'result': step_result,
                     'duration': step.end_time - step.start_time
                 })
-                print(f"   ✓ Completed ({step.end_time - step.start_time:.2f}s)")
+                print(f"   [OK] Completed ({step.end_time - step.start_time:.2f}s)")
                 
             except Exception as e:
                 step.status = PlanStatus.FAILED
@@ -275,13 +275,13 @@ Generate the plan now:
                     'step_id': step.step_id,
                     'error': str(e)
                 })
-                print(f"   ✗ Failed: {e}")
+                print(f"   [X] Failed: {e}")
             
             print()
         
         # Summary
         print(f"{'='*70}")
-        print(f"📊 EXECUTION SUMMARY")
+        print(f"[#] EXECUTION SUMMARY")
         print(f"{'='*70}")
         print(f"   Total steps: {len(steps)}")
         print(f"   Completed: {len(completed_steps)}")
@@ -321,7 +321,7 @@ Generate the plan now:
             
             return plan_id
         except Exception as e:
-            print(f"⚠ Failed to store plan in memory: {e}")
+            print(f"[!] Failed to store plan in memory: {e}")
             return -1
     
     def _store_execution_results(self, task: str, results: Dict, plan_id: int):
@@ -351,9 +351,9 @@ Generate the plan now:
                 self._consider_skill_extraction(task, results, result_id)
                 
         except Exception as e:
-            print(f"⚠ Failed to store execution results: {e}")
+            print(f"[!] Failed to store execution results: {e}")
     
     def _consider_skill_extraction(self, task: str, results: Dict, result_id: int):
         """Determine if successful execution should be extracted as a skill"""
         # This will be enhanced when we build the skill graph
-        print(f"💡 Task completed successfully - candidate for skill extraction")
+        print(f"[!] Task completed successfully - candidate for skill extraction")

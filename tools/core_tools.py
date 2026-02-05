@@ -191,12 +191,56 @@ class DataTools:
     
     @staticmethod
     def filter_list(data: List[Any], condition: str) -> List[Any]:
-        """Filter list based on condition (simple string contains)"""
+        """Filter list based on condition (string contains or extension patterns)"""
         try:
-            return [item for item in data if condition.lower() in str(item).lower()]
+            # If data is a string (e.g., newline-separated), split it
+            if isinstance(data, str):
+                # Handle both real newlines and escaped newlines (\\n)
+                import re
+                data = re.split(r'\\n|\n', data)
+                data = [line.strip() for line in data if line.strip()]
+
+            condition_lower = condition.lower().strip()
+
+            # Extract extension pattern from various formats
+            # Handles: ".py", "*.py", "ends with .py", "extension == '.py'", etc.
+            import re
+            ext_match = re.search(r'[\'"]?(\.\w+)[\'"]?', condition)
+            if ext_match:
+                suffix = ext_match.group(1).lower()
+                # Check if suffix appears in the item
+                return [item for item in data if suffix in str(item).lower()]
+
+            # Handle "ends with X" or "endswith X" patterns without extension
+            if 'ends' in condition_lower and 'with' in condition_lower:
+                parts = condition_lower.split()
+                suffix = parts[-1].strip('\'"')
+                return [item for item in data if suffix in str(item).lower()]
+
+            # Default: simple contains
+            return [item for item in data if condition_lower in str(item).lower()]
         except Exception as e:
             return [f"Filter error: {e}"]
     
+    @staticmethod
+    def count(data: Any) -> int:
+        """Count items in a list or characters/lines in a string"""
+        try:
+            if isinstance(data, str):
+                # Handle escaped newlines
+                import re
+                lines = re.split(r'\\n|\n', data)
+                lines = [line.strip() for line in lines if line.strip()]
+                return len(lines)
+            elif isinstance(data, (list, tuple, set)):
+                return len(data)
+            elif isinstance(data, dict):
+                return len(data)
+            else:
+                return 1
+        except Exception as e:
+            return f"Count error: {e}"
+
     @staticmethod
     def sort_list(data: List[Any], reverse: bool = False) -> List[Any]:
         """Sort a list"""
@@ -210,20 +254,24 @@ class CodeTools:
     """Code execution and analysis"""
     
     @staticmethod
-    def run_python(code: str, timeout: int = 10) -> str:
-        """Execute Python code safely"""
+    def run_python(code: str, timeout: int = 10, cwd: str = None) -> str:
+        """Execute Python code safely, optionally in a specified working directory"""
         try:
+            # Use current working directory if not specified
+            work_dir = cwd or os.getcwd()
+
             with tempfile.NamedTemporaryFile('w', suffix='.py', delete=False) as f:
                 f.write(code)
                 temp_path = f.name
-            
+
             result = subprocess.run(
                 ['python', temp_path],
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                cwd=work_dir
             )
-            
+
             os.remove(temp_path)
             
             if result.returncode == 0:

@@ -459,7 +459,7 @@ Provide a corrected version that addresses all issues. Explain your corrections.
         """
         results = []
         
-        print("\n🔍 INCREMENTAL REASONING VERIFICATION")
+        print("\n[?] INCREMENTAL REASONING VERIFICATION")
         print(f"{'='*70}\n")
         
         accumulated_context = f"Task: {task}\n\n"
@@ -486,7 +486,7 @@ Respond: [VALID] or [INVALID] followed by brief explanation.
                     feedback = verification.replace('[VALID]', '').replace('[INVALID]', '').strip()
                     
                     results.append((i, passed, feedback))
-                    print(f"  {'✓' if passed else '✗'} {feedback[:50]}...")
+                    print(f"  {'[OK]' if passed else '[X]'} {feedback[:50]}...")
                     
                 except Exception as e:
                     results.append((i, True, f"Verification error: {e}"))
@@ -501,7 +501,7 @@ Respond: [VALID] or [INVALID] followed by brief explanation.
                 feedback = "Contains potential contradiction" if has_contradiction else "Appears consistent"
                 
                 results.append((i, passed, feedback))
-                print(f"  {'✓' if passed else '✗'} {feedback}")
+                print(f"  {'[OK]' if passed else '[X]'} {feedback}")
         
         print()
         return results

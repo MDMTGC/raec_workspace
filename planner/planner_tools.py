@@ -64,11 +64,11 @@ class ToolEnabledPlanner:
         self.max_steps = max_steps
         self.current_plan = None
         self.execution_history = []
-        
-        # Tool interface
+
+        # Tool executor — expect a ToolExecutor instance from main.py
         if tools is None:
-            from tools.tool_interface import ToolInterface
-            self.tools = ToolInterface()
+            from tools.executor import ToolExecutor
+            self.tools = ToolExecutor()
         else:
             self.tools = tools
     
@@ -77,7 +77,7 @@ class ToolEnabledPlanner:
         Execute a task with planning and tool usage
         """
         print(f"\n{'='*70}")
-        print(f"🎯 TASK: {task}")
+        print(f"[o] TASK: {task}")
         print(f"{'='*70}\n")
         
         # Check for similar past tasks in memory
@@ -108,7 +108,7 @@ class ToolEnabledPlanner:
         try:
             from memory.memory_db import MemoryType
             
-            print("🔍 Searching memory for similar past tasks...")
+            print("[?] Searching memory for similar past tasks...")
             similar = self.memory.query(
                 query_text=task,
                 memory_types=[MemoryType.EXPERIENCE, MemoryType.SUMMARY],
@@ -117,13 +117,13 @@ class ToolEnabledPlanner:
             )
             
             if similar:
-                print(f"   ✓ Found {len(similar)} relevant past experiences\n")
+                print(f"   [OK] Found {len(similar)} relevant past experiences\n")
             else:
                 print("   • No similar past experiences found\n")
             
             return similar
         except Exception as e:
-            print(f"   ⚠ Memory query failed: {e}\n")
+            print(f"   [!] Memory query failed: {e}\n")
             return []
     
     def _generate_plan_with_tools(
@@ -133,11 +133,10 @@ class ToolEnabledPlanner:
         context: Optional[Dict]
     ) -> List[PlanStep]:
         """Generate a plan with tool assignments"""
-        print("📋 Generating execution plan with tool assignments...\n")
+        print("[=] Generating execution plan with tool assignments...\n")
         
         # Get available tools for LLM
-        from tools.tool_interface import get_tools_for_llm
-        tools_doc = get_tools_for_llm()
+        tools_doc = self.tools.get_tools_for_llm()
         
         # Build prompt
         prompt = self._build_planning_prompt_with_tools(
@@ -151,7 +150,7 @@ class ToolEnabledPlanner:
             # Parse plan into steps with tool assignments
             steps = self._parse_plan_with_tools(plan_text)
             
-            print(f"✓ Generated plan with {len(steps)} steps:\n")
+            print(f"[OK] Generated plan with {len(steps)} steps:\n")
             for step in steps:
                 tool_info = f" [{step.tool_category}.{step.tool_name}]" if step.tool_category else ""
                 deps = f" (depends on: {step.dependencies})" if step.dependencies else ""
@@ -161,7 +160,7 @@ class ToolEnabledPlanner:
             return steps
             
         except Exception as e:
-            print(f"⚠ Plan generation failed: {e}")
+            print(f"[!] Plan generation failed: {e}")
             # Fallback to simple single-step plan
             return [PlanStep(1, f"Complete task: {task}")]
     
@@ -188,30 +187,30 @@ class ToolEnabledPlanner:
         
         prompt_parts.append(f"\n{tools_doc}")
         
-        prompt_parts.append("""
+        prompt_parts.append('''
 \n**Instructions:**
 1. Break the task into clear, actionable steps.
 2. For each step that requires a tool, specify:
    - TOOL: category.tool_name
-   - PARAMS: {param1: value1, param2: value2}
+   - PARAMS: {"param_name": "value"} (use exact parameter names from tool signatures)
 3. Number steps sequentially (1, 2, 3...).
 4. If a step depends on another, add [DEPENDS: X].
 
 Example Output Format:
-1. Read the input file
+1. List directory contents
+   TOOL: file.list_directory
+   PARAMS: {"dirpath": "."}
+
+2. Read the input file [DEPENDS: 1]
    TOOL: file.read_file
-   PARAMS: {filepath: "input.txt"}
+   PARAMS: {"filepath": "input.txt"}
 
-2. Process the data [DEPENDS: 1]
+3. Process the data [DEPENDS: 2]
    TOOL: code.run_python
-   PARAMS: {code: "print('processing')"}
-
-3. Write output [DEPENDS: 2]
-   TOOL: file.write_file
-   PARAMS: {filepath: "output.txt", content: "result"}
+   PARAMS: {"code": "result = data.upper()"}
 
 Generate the plan now:
-""")
+''')
         
         return "\n".join(prompt_parts)
     
@@ -303,7 +302,7 @@ Generate the plan now:
         context: Optional[Dict]
     ) -> Dict[str, Any]:
         """Execute plan steps using actual tools"""
-        print("⚙️  EXECUTING PLAN WITH TOOLS\n")
+        print("[*]  EXECUTING PLAN WITH TOOLS\n")
         print(f"{'='*70}\n")
         
         completed_steps = set()
@@ -321,43 +320,47 @@ Generate the plan now:
             if not all(dep in completed_steps for dep in step.dependencies):
                 step.status = PlanStatus.BLOCKED
                 results['steps'].append(self._step_to_dict(step))
-                print(f"⏸️  Step {step.step_id}: BLOCKED (dependencies not met)")
+                print(f"[||]  Step {step.step_id}: BLOCKED (dependencies not met)")
                 continue
             
             # Execute step
-            print(f"▶️  Step {step.step_id}: {step.description}")
+            print(f"[>]  Step {step.step_id}: {step.description}")
             step.status = PlanStatus.IN_PROGRESS
             step.start_time = time.time()
             
             try:
                 # Execute using tools if specified
                 if step.tool_category and step.tool_name:
-                    print(f"   🔧 Using tool: {step.tool_category}.{step.tool_name}")
-                    print(f"   📥 Params: {step.tool_params}")
-                    
+                    tool_key = f"{step.tool_category}.{step.tool_name}"
+
+                    # Resolve params - inject previous step results where needed
+                    resolved_params = self._resolve_params(step.tool_params, step_results)
+
+                    print(f"   Using tool: {tool_key}")
+                    print(f"   Params: {resolved_params}")
+
                     step_result = self.tools.execute(
-                        step.tool_category,
-                        step.tool_name,
-                        **step.tool_params
+                        tool_key,
+                        **resolved_params
                     )
                     
                     step.result = str(step_result)
                     step.status = PlanStatus.COMPLETED
-                    print(f"   ✓ Result: {str(step_result)[:100]}...")
+                    print(f"   [OK] Result: {str(step_result)[:100]}...")
                 else:
                     # No tool specified - use LLM to execute
-                    print(f"   🤖 Using LLM reasoning")
+                    print(f"   [R] Using LLM reasoning")
                     step_result = self._execute_step_with_llm(step, task, step_results, context)
                     step.result = step_result
                     step.status = PlanStatus.COMPLETED
-                    print(f"   ✓ Completed")
+                    print(f"   [OK] Completed")
                 
                 step.end_time = time.time()
                 completed_steps.add(step.step_id)
                 step_results[step.step_id] = step.result
                 
                 results['steps'].append(self._step_to_dict(step))
-                print(f"   ⏱️  Duration: {step.end_time - step.start_time:.2f}s\n")
+                print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
                 
             except Exception as e:
                 step.status = PlanStatus.FAILED
@@ -372,11 +375,11 @@ Generate the plan now:
                 })
                 
                 results['steps'].append(self._step_to_dict(step))
-                print(f"   ✗ Failed: {e}\n")
+                print(f"   [X] Failed: {e}\n")
         
         # Summary
         print(f"{'='*70}")
-        print(f"📊 EXECUTION SUMMARY")
+        print(f"[#] EXECUTION SUMMARY")
         print(f"{'='*70}")
         print(f"   Total steps: {len(steps)}")
         print(f"   Completed: {len(completed_steps)}")
@@ -386,7 +389,141 @@ Generate the plan now:
         print()
         
         return results
-    
+
+    def _resolve_params(
+        self,
+        params: Dict[str, Any],
+        step_results: Dict[int, str]
+    ) -> Dict[str, Any]:
+        """
+        Resolve parameter values, injecting previous step results where needed.
+
+        Strategy:
+        - If param key suggests data input (data, input, list, items, content, text)
+          and value is a simple word, inject last result
+        - Explicit references like $step1 get resolved
+        - Concrete values (paths, expressions) pass through
+        """
+        import re
+
+        if not params or not step_results:
+            return params
+
+        resolved = {}
+        last_result = list(step_results.values())[-1] if step_results else None
+
+        # Keys that typically need data from previous steps
+        data_keys = {'data', 'input', 'list', 'items', 'content', 'text', 'numbers', 'code', 'source'}
+
+        for key, value in params.items():
+            # If key suggests data input and value looks like a placeholder
+            if key.lower() in data_keys and isinstance(value, str):
+                # Check for angle bracket placeholders like <contents_of_file>
+                if re.match(r'^<[^>]+>$', value) and last_result:
+                    resolved[key] = self._extract_result_data(last_result)
+                    continue
+                # Simple word or placeholder = inject last result
+                if re.match(r'^[\w\s\[\]]+$', value) and last_result:
+                    # Try to extract actual data from ToolResult
+                    resolved[key] = self._extract_result_data(last_result)
+                    continue
+
+            if isinstance(value, str):
+                lower_val = value.lower()
+
+                # Explicit step references
+                step_ref = re.search(r'\$?step[_\s]*(\d+)', lower_val)
+                if step_ref:
+                    step_num = int(step_ref.group(1))
+                    if step_num in step_results:
+                        resolved[key] = self._extract_result_data(step_results[step_num])
+                        continue
+
+                # Placeholder patterns
+                if any(p in lower_val for p in ['[list', '[result', 'previous', 'filtered']):
+                    if last_result:
+                        resolved[key] = self._extract_result_data(last_result)
+                        continue
+
+            # Default: pass through unchanged
+            resolved[key] = value
+
+        return resolved
+
+    def _extract_result_data(self, result_str: str) -> Any:
+        """Extract actual data from a ToolResult string or return as-is"""
+        import re
+        import ast
+
+        result_str = str(result_str)
+
+        # Try to extract output from ToolResult string
+        if 'output=' in result_str:
+            # Find the output= part and extract the value
+            output_start = result_str.find('output=')
+            if output_start != -1:
+                rest = result_str[output_start + 7:]  # After 'output='
+
+                # Handle None
+                if rest.startswith('None'):
+                    return None
+
+                # Handle list [...] - match balanced brackets
+                if rest.startswith('['):
+                    bracket_count = 0
+                    end_idx = 0
+                    for i, char in enumerate(rest):
+                        if char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                end_idx = i + 1
+                                break
+                    if end_idx > 0:
+                        list_str = rest[:end_idx]
+                        try:
+                            return ast.literal_eval(list_str)
+                        except:
+                            return list_str
+
+                # Handle string '...' - find matching quote
+                if rest.startswith("'"):
+                    end_idx = 1
+                    while end_idx < len(rest):
+                        if rest[end_idx] == "'" and (end_idx == 1 or rest[end_idx-1] != '\\'):
+                            break
+                        end_idx += 1
+                    if end_idx < len(rest):
+                        return rest[1:end_idx]
+
+                # Handle dict {...} - match balanced braces
+                if rest.startswith('{'):
+                    brace_count = 0
+                    end_idx = 0
+                    for i, char in enumerate(rest):
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                end_idx = i + 1
+                                break
+                    if end_idx > 0:
+                        dict_str = rest[:end_idx]
+                        try:
+                            return ast.literal_eval(dict_str)
+                        except:
+                            return dict_str
+
+                # Handle number
+                num_match = re.match(r'^(\d+(?:\.\d+)?)', rest)
+                if num_match:
+                    num_str = num_match.group(1)
+                    return float(num_str) if '.' in num_str else int(num_str)
+
+        return result_str
+
     def _execute_step_with_llm(
         self,
         step: PlanStep,
@@ -445,7 +582,7 @@ Provide the result of this step.
             
             return plan_id
         except Exception as e:
-            print(f"⚠ Failed to store plan: {e}")
+            print(f"[!] Failed to store plan: {e}")
             return -1
     
     def _store_execution_results(self, task: str, results: Dict, plan_id: int):
@@ -475,11 +612,11 @@ Provide the result of this step.
                 self._consider_skill_extraction(task, results, result_id)
                 
         except Exception as e:
-            print(f"⚠ Failed to store execution results: {e}")
+            print(f"[!] Failed to store execution results: {e}")
     
     def _consider_skill_extraction(self, task: str, results: Dict, result_id: int):
         """Consider extracting successful execution as a skill"""
-        print(f"💡 Task completed successfully - candidate for skill extraction")
+        print(f"[!] Task completed successfully - candidate for skill extraction")
 
 
 # Backward compatibility

@@ -443,6 +443,364 @@ class HierarchicalMemoryDB:
         
         return results
 
+    # ------------------------------------------------------------------
+    # MEMORY DECAY SYSTEM
+    # ------------------------------------------------------------------
+    # Implements natural decay for low-stakes data while preserving
+    # critical developmental knowledge. Aligns with RAEC's principle
+    # that identity comes from immutable rules, not memory accumulation.
+    # ------------------------------------------------------------------
+
+    def decay_memories(
+        self,
+        decay_rate: float = 0.01,
+        min_confidence: float = 0.1,
+        protected_types: Optional[List[MemoryType]] = None,
+        age_threshold_hours: float = 24.0
+    ) -> Dict:
+        """
+        Apply time-based confidence decay to memories.
+
+        Low-stakes memories (EXPERIENCE, BELIEF) decay over time.
+        FACT and SUMMARY are protected by default but can be configured.
+        Memories below min_confidence are deactivated (soft-deleted).
+
+        Args:
+            decay_rate: Confidence lost per day of age (default 0.01 = 1%/day)
+            min_confidence: Threshold below which memories are deactivated
+            protected_types: Memory types exempt from decay (default: FACT, SUMMARY)
+            age_threshold_hours: Only decay memories older than this
+
+        Returns:
+            Dict with stats: decayed_count, deactivated_count, protected_count
+        """
+        if protected_types is None:
+            protected_types = [MemoryType.FACT, MemoryType.SUMMARY]
+
+        now = time.time()
+        age_threshold_secs = age_threshold_hours * 3600
+
+        # Get all active, non-protected memories older than threshold
+        type_placeholders = ','.join('?' * len(protected_types))
+        protected_values = [t.value for t in protected_types]
+
+        self.cursor.execute(f"""
+            SELECT id, memory_type, confidence, timestamp, metadata
+            FROM memories
+            WHERE active = 1
+              AND memory_type NOT IN ({type_placeholders})
+              AND (? - timestamp) > ?
+        """, (*protected_values, now, age_threshold_secs))
+
+        rows = self.cursor.fetchall()
+
+        decayed = 0
+        deactivated = 0
+        protected = 0
+
+        for row in rows:
+            mem_id, mem_type, conf, ts, meta_json = row
+            age_days = (now - ts) / 86400.0
+
+            # Check if memory is protected by high access count
+            meta = json.loads(meta_json) if meta_json else {}
+            access_count = meta.get('access_count', 0)
+            if access_count >= 10:
+                # High-access memories are protected
+                protected += 1
+                continue
+
+            # Calculate decayed confidence
+            decay_amount = decay_rate * age_days
+            new_conf = max(0.0, conf - decay_amount)
+
+            if new_conf < min_confidence:
+                # Deactivate memory
+                self.cursor.execute(
+                    "UPDATE memories SET active = 0, confidence = ? WHERE id = ?",
+                    (new_conf, mem_id)
+                )
+                deactivated += 1
+            else:
+                # Apply decay
+                self.cursor.execute(
+                    "UPDATE memories SET confidence = ? WHERE id = ?",
+                    (new_conf, mem_id)
+                )
+                decayed += 1
+
+        self.conn.commit()
+
+        return {
+            'decayed_count': decayed,
+            'deactivated_count': deactivated,
+            'protected_count': protected,
+            'total_processed': len(rows)
+        }
+
+    def compact_old_memories(
+        self,
+        age_threshold_hours: float = 168.0,  # 1 week
+        cluster_size: int = 5,
+        llm_interface=None
+    ) -> Dict:
+        """
+        Compact old memories by summarizing clusters.
+
+        Groups old memories by topic/similarity and creates SUMMARY entries,
+        then deactivates the original entries. Preserves information in
+        compressed form.
+
+        Args:
+            age_threshold_hours: Only compact memories older than this
+            cluster_size: Minimum cluster size to trigger summarization
+            llm_interface: Optional LLM for generating summaries
+
+        Returns:
+            Dict with stats: clusters_created, memories_compacted
+        """
+        now = time.time()
+        age_threshold_secs = age_threshold_hours * 3600
+
+        # Get old EXPERIENCE memories
+        self.cursor.execute("""
+            SELECT id, content, timestamp, metadata
+            FROM memories
+            WHERE active = 1
+              AND memory_type = ?
+              AND (? - timestamp) > ?
+            ORDER BY timestamp
+        """, (MemoryType.EXPERIENCE.value, now, age_threshold_secs))
+
+        old_memories = self.cursor.fetchall()
+
+        if len(old_memories) < cluster_size:
+            return {'clusters_created': 0, 'memories_compacted': 0}
+
+        # Simple clustering: group by time proximity (within 1 hour)
+        clusters = []
+        current_cluster = []
+        last_ts = None
+
+        for mem in old_memories:
+            mem_id, content, ts, meta = mem
+            if last_ts is None or (ts - last_ts) < 3600:
+                current_cluster.append((mem_id, content, ts, meta))
+            else:
+                if len(current_cluster) >= cluster_size:
+                    clusters.append(current_cluster)
+                current_cluster = [(mem_id, content, ts, meta)]
+            last_ts = ts
+
+        if len(current_cluster) >= cluster_size:
+            clusters.append(current_cluster)
+
+        summaries_created = 0
+        memories_compacted = 0
+
+        for cluster in clusters:
+            mem_ids = [m[0] for m in cluster]
+            contents = [m[1] for m in cluster]
+
+            # Generate summary
+            if llm_interface:
+                prompt = f"Summarize these related experiences in 1-2 sentences:\n\n"
+                prompt += "\n".join(f"- {c}" for c in contents)
+                summary_text = llm_interface.generate(prompt, max_tokens=100)
+            else:
+                # Simple fallback: concatenate first 50 chars of each
+                summary_text = "Cluster of experiences: " + "; ".join(
+                    c[:50] for c in contents[:3]
+                ) + "..."
+
+            # Create summary
+            self.create_summary(mem_ids, summary_text, topic="auto_compacted")
+
+            # Deactivate original memories
+            for mem_id in mem_ids:
+                self.cursor.execute(
+                    "UPDATE memories SET active = 0 WHERE id = ?",
+                    (mem_id,)
+                )
+                memories_compacted += 1
+
+            summaries_created += 1
+
+        self.conn.commit()
+
+        return {
+            'clusters_created': summaries_created,
+            'memories_compacted': memories_compacted
+        }
+
+    def fragment_weak_beliefs(
+        self,
+        confidence_threshold: float = 0.3,
+        llm_interface=None
+    ) -> Dict:
+        """
+        Fragment low-confidence beliefs into atomic facts.
+
+        When a belief falls below the threshold, extract any verifiable
+        atomic facts from it before deactivating. This preserves valuable
+        nuggets while discarding uncertain interpretations.
+
+        Args:
+            confidence_threshold: Beliefs below this are fragmented
+            llm_interface: Optional LLM for extracting facts
+
+        Returns:
+            Dict with stats: beliefs_fragmented, facts_extracted
+        """
+        self.cursor.execute("""
+            SELECT id, content, confidence, metadata
+            FROM memories
+            WHERE active = 1
+              AND memory_type = ?
+              AND confidence < ?
+        """, (MemoryType.BELIEF.value, confidence_threshold))
+
+        weak_beliefs = self.cursor.fetchall()
+        beliefs_fragmented = 0
+        facts_extracted = 0
+
+        for belief in weak_beliefs:
+            belief_id, content, conf, meta_json = belief
+
+            # Extract facts using LLM or simple heuristic
+            if llm_interface:
+                prompt = (
+                    f"Extract any verifiable facts from this uncertain belief. "
+                    f"Return only concrete, atomic facts, one per line:\n\n{content}"
+                )
+                facts_text = llm_interface.generate(prompt, max_tokens=200)
+                facts = [f.strip() for f in facts_text.split('\n') if f.strip()]
+            else:
+                # Simple heuristic: look for statements with numbers or dates
+                import re
+                facts = []
+                sentences = content.split('.')
+                for sent in sentences:
+                    if re.search(r'\d', sent):  # Contains numbers
+                        facts.append(sent.strip())
+
+            # Store extracted facts
+            for fact in facts:
+                if len(fact) > 10:  # Skip trivial fragments
+                    self.store(
+                        content=fact,
+                        memory_type=MemoryType.FACT,
+                        confidence=0.7,  # Lower confidence since extracted
+                        source=f"fragmented_from_belief:{belief_id}",
+                        linked_to=[belief_id]
+                    )
+                    facts_extracted += 1
+
+            # Deactivate the weak belief
+            self.cursor.execute(
+                "UPDATE memories SET active = 0 WHERE id = ?",
+                (belief_id,)
+            )
+            beliefs_fragmented += 1
+
+        self.conn.commit()
+
+        return {
+            'beliefs_fragmented': beliefs_fragmented,
+            'facts_extracted': facts_extracted
+        }
+
+    def record_access(self, memory_id: int):
+        """
+        Record that a memory was accessed (used in retrieval).
+
+        High-access memories are protected from decay.
+        """
+        self.cursor.execute(
+            "SELECT metadata FROM memories WHERE id = ?",
+            (memory_id,)
+        )
+        row = self.cursor.fetchone()
+        if row:
+            meta = json.loads(row[0]) if row[0] else {}
+            meta['access_count'] = meta.get('access_count', 0) + 1
+            meta['last_accessed'] = time.time()
+            self.cursor.execute(
+                "UPDATE memories SET metadata = ? WHERE id = ?",
+                (json.dumps(meta), memory_id)
+            )
+            self.conn.commit()
+
+    def run_maintenance(self, llm_interface=None) -> Dict:
+        """
+        Run full memory maintenance cycle.
+
+        Should be called periodically (e.g., daily) to:
+        1. Decay old, low-value memories
+        2. Compact clusters of old experiences
+        3. Fragment weak beliefs into facts
+
+        Returns:
+            Combined stats from all maintenance operations
+        """
+        stats = {}
+
+        # Step 1: Decay
+        decay_stats = self.decay_memories()
+        stats['decay'] = decay_stats
+
+        # Step 2: Compact (only if we have many old memories)
+        compact_stats = self.compact_old_memories(llm_interface=llm_interface)
+        stats['compact'] = compact_stats
+
+        # Step 3: Fragment weak beliefs
+        fragment_stats = self.fragment_weak_beliefs(llm_interface=llm_interface)
+        stats['fragment'] = fragment_stats
+
+        return stats
+
+    def get_memory_health(self) -> Dict:
+        """
+        Get statistics about memory system health.
+
+        Returns counts by type, average confidence, decay candidates, etc.
+        """
+        stats = {}
+
+        # Count by type
+        for mem_type in MemoryType:
+            self.cursor.execute(
+                "SELECT COUNT(*) FROM memories WHERE memory_type = ? AND active = 1",
+                (mem_type.value,)
+            )
+            stats[f'{mem_type.value}_count'] = self.cursor.fetchone()[0]
+
+        # Total active
+        self.cursor.execute("SELECT COUNT(*) FROM memories WHERE active = 1")
+        stats['total_active'] = self.cursor.fetchone()[0]
+
+        # Total inactive (decayed/deactivated)
+        self.cursor.execute("SELECT COUNT(*) FROM memories WHERE active = 0")
+        stats['total_inactive'] = self.cursor.fetchone()[0]
+
+        # Average confidence
+        self.cursor.execute("SELECT AVG(confidence) FROM memories WHERE active = 1")
+        avg = self.cursor.fetchone()[0]
+        stats['avg_confidence'] = avg if avg else 0.0
+
+        # Decay candidates (old, low-confidence, non-protected)
+        now = time.time()
+        self.cursor.execute("""
+            SELECT COUNT(*) FROM memories
+            WHERE active = 1
+              AND memory_type IN (?, ?)
+              AND confidence < 0.5
+              AND (? - timestamp) > 86400
+        """, (MemoryType.EXPERIENCE.value, MemoryType.BELIEF.value, now))
+        stats['decay_candidates'] = self.cursor.fetchone()[0]
+
+        return stats
+
     def close(self):
         """Close database connection"""
         self.conn.close()

@@ -20,10 +20,10 @@
     "data_transform": "qwen3:4b",
     "extraction": "qwen3:4b",
 
-    "memory_digest": "llama3.2:3b",
-    "log_compression": "llama3.2:3b",
-    "history_summary": "llama3.2:3b",
-    "context_curation": "llama3.2:3b",
+    "memory_digest": "jamba-reasoning:3b",
+    "log_compression": "jamba-reasoning:3b",
+    "history_summary": "jamba-reasoning:3b",
+    "context_curation": "jamba-reasoning:3b",
 
     "default": "raec:latest"
   },

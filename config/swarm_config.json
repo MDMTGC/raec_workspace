@@ -1,9 +1,9 @@
 {
   "model_map": {
-    "reasoning": "raec:latest",
-    "synthesis": "raec:latest",
-    "planning": "raec:latest",
-    "error_recovery": "raec:latest",
+    "reasoning": "qwen3:14b",
+    "synthesis": "qwen3:14b",
+    "planning": "qwen3:14b",
+    "error_recovery": "qwen3:14b",
 
     "code_generation": "qwen2.5-coder:7b",
     "code_analysis": "qwen2.5-coder:7b",
@@ -42,15 +42,16 @@
 
     "tiers": {
       "orchestrator": {
-        "size": "32B+",
-        "vram": "~20GB",
+        "size": "14B (optimized from 32B)",
+        "vram": "~10GB",
         "role": "Complex reasoning, planning, synthesis",
         "validated_models": [
-          "deepseek-r1:32b (current, strong reasoning)",
-          "qwen2.5:32b (strong general purpose)",
-          "falcon-h1:34b (NEW: hybrid, beats Qwen3-32B)"
+          "qwen3:14b (CURRENT: rivals 32B quality at 2x speed)",
+          "deepseek-r1:32b (fallback, strong reasoning)",
+          "qwen2.5:32b (fallback, strong general purpose)"
         ],
-        "task_types": ["reasoning", "synthesis", "planning", "error_recovery"]
+        "task_types": ["reasoning", "synthesis", "planning", "error_recovery"],
+        "optimization_note": "14B achieves comparable ArenaHard scores to 32B with ~2x faster inference"
       },
 
       "coder": {

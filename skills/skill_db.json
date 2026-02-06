@@ -1,8 +1,14 @@
 {
-    "skills": {},
-    "metadata": {
-        "version": "1.0",
-        "last_updated": "2024-05-21",
-        "total_skills": 0
+  "skills": {},
+  "dependencies": {},
+  "audit_log": [
+    {
+      "timestamp": 1770400000.0,
+      "action": "database_reset",
+      "details": {
+        "reason": "Cleaned up polluted skills (system directives as names, duplicates)",
+        "previous_skill_count": 3
+      }
     }
+  ]
 }

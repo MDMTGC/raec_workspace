@@ -149,8 +149,25 @@ class SkillGraph:
         # Check if similar skill already exists
         similar = self._find_similar_skills(task_description, category)
         if similar:
-            print(f"[!] Similar skill already exists: {similar[0].name}")
-            # Could merge or update instead of creating new
+            # Check if any similar skill is already verified
+            verified_similar = [s for s in similar if s.status == SkillStatus.VERIFIED]
+            if verified_similar:
+                existing = verified_similar[0]
+                print(f"[!] Similar verified skill already exists: {existing.name}")
+                print(f"    Skipping extraction - use existing skill instead")
+                # Add this execution as additional evidence to existing skill
+                evidence = SkillEvidence(
+                    task_description=task_description,
+                    execution_result=execution_result,
+                    success_metrics=self._compute_success_metrics(execution_result),
+                    timestamp=time.time()
+                )
+                existing.evidence.append(evidence)
+                self._save()
+                return existing.skill_id
+            else:
+                print(f"[!] Similar unverified skill exists: {similar[0].name}")
+                # Continue with extraction - may supersede the unverified one
         
         # Create evidence from execution
         evidence = SkillEvidence(
@@ -492,9 +509,28 @@ class SkillGraph:
     
     def _generate_skill_name(self, task_description: str) -> str:
         """Generate a readable name from task description"""
-        # Take first few words, clean up
-        words = task_description.split()[:5]
+        # Strip common system directive patterns
+        cleaned = task_description
+
+        # Remove "You are a..." preambles
+        import re
+        cleaned = re.sub(r'^You are [^.]+\.\s*', '', cleaned, flags=re.IGNORECASE)
+
+        # Remove "Task:" prefix
+        cleaned = re.sub(r'^Task:\s*', '', cleaned, flags=re.IGNORECASE)
+
+        # Remove role/instruction preambles
+        cleaned = re.sub(r'^(Provide|Generate|Create|Analyze|Execute)[^.]*\.\s*', '', cleaned, flags=re.IGNORECASE)
+
+        # Take first meaningful words
+        words = cleaned.strip().split()[:5]
         name = " ".join(words)
+
+        # Fallback if empty
+        if not name or len(name) < 3:
+            words = task_description.split()[:5]
+            name = " ".join(words)
+
         if len(name) > 50:
             name = name[:47] + "..."
         return name

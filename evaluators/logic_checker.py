@@ -252,19 +252,55 @@ class LogicChecker:
                     ]
                 )
         
-        # Check for error indicators
+        # Check for error indicators with context awareness
         output_str = str(output).lower()
-        error_indicators = ['error', 'failed', 'exception', 'traceback']
-        
-        if any(indicator in output_str for indicator in error_indicators):
-            return VerificationResult(
-                level=VerificationLevel.OUTPUT,
-                passed=False,
-                severity=SeverityLevel.ERROR,
-                message="Output contains error indicators",
-                details={'output_preview': str(output)[:200]},
-                suggestions=["Review error message and fix underlying issue"]
-            )
+
+        # Patterns that indicate ACTUAL errors (not just the word "error")
+        error_patterns = [
+            r'\berror:\s',              # "error: something"
+            r'\bfailed:\s',             # "failed: reason"
+            r'\bexception:\s',          # "exception: type"
+            r'\btraceback\s*\(',        # "Traceback (most recent"
+            r'raise\s+\w+error',        # "raise ValueError"
+            r'\bfatal\s+error\b',       # "fatal error"
+            r'\berror\s+code\s*[:\d]',  # "error code 1"
+            r'\bsyntaxerror\b',         # Python SyntaxError
+            r'\bnameerror\b',           # Python NameError
+            r'\btypeerror\b',           # Python TypeError
+            r'\bvalueerror\b',          # Python ValueError
+            r'\bkeyerror\b',            # Python KeyError
+            r'\battributeerror\b',      # Python AttributeError
+        ]
+
+        # Patterns that indicate FALSE POSITIVES (legitimate uses)
+        safe_patterns = [
+            r'no\s+errors?\b',          # "no error", "no errors"
+            r'error\s*handling',        # "error handling"
+            r'error\s*message',         # "error message" (documentation)
+            r'errors?\s*found:\s*0',    # "errors found: 0"
+            r'without\s+error',         # "completed without error"
+            r'error\s*free',            # "error free"
+            r'handle\s+.*\s*error',     # "handle the error"
+            r'catch\s+.*\s*error',      # "catch errors"
+            r'error\s*log',             # "error log" (as a noun)
+            r'success.*fail',           # "success/fail" patterns
+        ]
+
+        # Check if any safe pattern matches first
+        is_safe = any(re.search(p, output_str) for p in safe_patterns)
+
+        # Only flag if actual error pattern found AND no safe pattern
+        if not is_safe:
+            for pattern in error_patterns:
+                if re.search(pattern, output_str):
+                    return VerificationResult(
+                        level=VerificationLevel.OUTPUT,
+                        passed=False,
+                        severity=SeverityLevel.ERROR,
+                        message="Output contains error indicators",
+                        details={'output_preview': str(output)[:200], 'pattern': pattern},
+                        suggestions=["Review error message and fix underlying issue"]
+                    )
         
         # Check for empty/null output
         if not output or output == "" or output == "None":

@@ -49,6 +49,7 @@ class StatsPanel(ctk.CTkFrame):
             ("tools", "Tools", "0"),
             ("agents", "Agents", "0"),
             ("verifications", "Verified", "0"),
+            ("swarm", "Swarm", "-"),
         ]
 
         for key, label, default in stats:
@@ -98,6 +99,10 @@ class StatsPanel(ctk.CTkFrame):
             if 'verification' in stats:
                 total = stats['verification'].get('total_verifications', 0)
                 self.stat_labels['verifications'].configure(text=str(total))
+
+            if 'swarm' in stats and stats['swarm']:
+                models = len(stats['swarm'].get('available_models', []))
+                self.stat_labels['swarm'].configure(text=f"{models} models")
         except Exception as e:
             print(f"Stats update error: {e}")
 

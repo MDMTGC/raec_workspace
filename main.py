@@ -114,6 +114,10 @@ class Raec:
         self._recent_actions = []
         self._max_action_history = 100
 
+        # Memory curation settings
+        self._memory_curation_threshold = 50  # Curate after this many experiences
+        self._last_curation_count = 0
+
         print("\n" + "="*70)
         print("[OK] RAEC SYSTEM ONLINE")
         print("="*70 + "\n")
@@ -212,17 +216,22 @@ Based on the execution data, provide a direct, concise response.
             print(f"[RULES] {msg}")
 
         if mode == "standard":
-            return self._execute_standard(task, context)
+            result = self._execute_standard(task, context)
         elif mode == "collaborative":
-            return self._execute_collaborative(task, context)
+            result = self._execute_collaborative(task, context)
         elif mode == "incremental":
-            return self._execute_incremental(task, context)
+            result = self._execute_incremental(task, context)
         else:
             return {
                 'success': False,
                 'error': f"Unknown mode: {mode}",
                 'task': task
             }
+
+        # Trigger memory curation if threshold met
+        self._maybe_curate_memory()
+
+        return result
     
     def _execute_standard(self, task: str, context: Optional[Dict]) -> Dict[str, Any]:
         """
@@ -444,6 +453,73 @@ Provide 5-7 numbered steps showing your reasoning process.
         print(f"   [OK] Skill extracted (ID: {skill_id[:8]}...)")
         print(f"   Status: CANDIDATE - needs verification before reuse\n")
     
+    def curate_memory(self, force: bool = False) -> Dict[str, Any]:
+        """
+        Curate memory using SSM model (Jamba) for efficient long-context processing.
+
+        This compacts old experiences into summaries, preserving information
+        while reducing memory footprint. Uses MEMORY_DIGEST task type to route
+        to SSM/Mamba model which has O(n) linear scaling vs O(n²) transformers.
+
+        Args:
+            force: If True, run curation regardless of threshold
+
+        Returns:
+            Dict with curation statistics
+        """
+        # Check if curation is needed
+        current_count = len(self.memory.get_recent_by_type(MemoryType.EXPERIENCE, limit=10000))
+
+        if not force and (current_count - self._last_curation_count) < self._memory_curation_threshold:
+            return {'skipped': True, 'reason': 'threshold_not_met', 'current_count': current_count}
+
+        print("\n[~] MEMORY CURATION (using SSM model)")
+        print(f"   Experiences: {current_count}")
+
+        # Create a curation-specific LLM wrapper that forces MEMORY_DIGEST routing
+        class CurationLLM:
+            def __init__(self, llm_interface):
+                self.llm = llm_interface
+
+            def generate(self, prompt, max_tokens=100):
+                # Force routing to SSM model via task type
+                return self.llm.generate(
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                    task_type=TaskType.MEMORY_DIGEST
+                )
+
+        curation_llm = CurationLLM(self.llm)
+
+        # Run compaction with SSM model
+        result = self.memory.compact_old_memories(
+            age_threshold_hours=24.0,  # Compact memories older than 24 hours
+            cluster_size=3,
+            llm_interface=curation_llm
+        )
+
+        self._last_curation_count = current_count
+
+        print(f"   Clusters created: {result.get('clusters_created', 0)}")
+        print(f"   Memories compacted: {result.get('memories_compacted', 0)}")
+
+        return {
+            'skipped': False,
+            'clusters_created': result.get('clusters_created', 0),
+            'memories_compacted': result.get('memories_compacted', 0),
+            'previous_count': current_count,
+        }
+
+    def _maybe_curate_memory(self):
+        """Check and run memory curation if threshold is met"""
+        try:
+            result = self.curate_memory(force=False)
+            if not result.get('skipped') and result.get('memories_compacted', 0) > 0:
+                print(f"   [OK] Memory curation complete")
+        except Exception as e:
+            print(f"   [!] Memory curation failed: {e}")
+
     def analyze_performance(self) -> Dict[str, Any]:
         """
         Comprehensive system performance analysis

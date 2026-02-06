@@ -270,24 +270,45 @@ class SkillGraph:
         return skill.status == SkillStatus.VERIFIED
     
     def _default_verifier(self, skill: Skill, test_case: Dict) -> Dict:
-        """Default verification logic"""
-        # Simple pass/fail based on expected output
+        """
+        Default verification logic
+
+        Supports multiple test case formats:
+        1. {'expected': True/False} - declarative pass/fail
+        2. {'expected': value, 'actual': value} - value comparison
+        3. {'error': None} - pass if no error
+        4. {'pass': True/False} - explicit pass/fail
+        """
         expected = test_case.get('expected', None)
         actual = test_case.get('actual', None)
-        
+        explicit_pass = test_case.get('pass', None)
+
+        # Format 4: Explicit pass/fail
+        if explicit_pass is not None:
+            passed = bool(explicit_pass)
+            score = 1.0 if passed else 0.0
+            return {'passed': passed, 'score': score, 'details': {'mode': 'explicit'}}
+
+        # Format 1: Declarative - expected is a boolean indicating should-pass
+        if expected is not None and actual is None and isinstance(expected, bool):
+            passed = expected
+            score = 1.0 if passed else 0.0
+            return {'passed': passed, 'score': score, 'details': {'mode': 'declarative'}}
+
+        # Format 3: No expected, check for error
         if expected is None:
-            # No expected output, assume pass if no error
             passed = test_case.get('error') is None
             score = 1.0 if passed else 0.0
-        else:
-            # Compare expected vs actual
-            passed = expected == actual
-            score = 1.0 if passed else 0.0
-        
+            return {'passed': passed, 'score': score, 'details': {'mode': 'error_check'}}
+
+        # Format 2: Compare expected vs actual
+        passed = expected == actual
+        score = 1.0 if passed else 0.0
         return {
             'passed': passed,
             'score': score,
             'details': {
+                'mode': 'comparison',
                 'expected': expected,
                 'actual': actual
             }

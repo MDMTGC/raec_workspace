@@ -279,10 +279,15 @@ Generate the plan now:
             if params_match:
                 try:
                     params_str = params_match.group(1)
-                    # Try to parse as dict
-                    current_params = eval(params_str)
-                except:
-                    pass
+                    # Try to parse as dict - prefer json.loads for safety
+                    import ast
+                    try:
+                        current_params = json.loads(params_str)
+                    except json.JSONDecodeError:
+                        # Fallback to ast.literal_eval for Python dict syntax
+                        current_params = ast.literal_eval(params_str)
+                except (ValueError, SyntaxError) as e:
+                    print(f"   [!] Failed to parse PARAMS: {params_str[:50]}... ({e})")
 
         # Save last step
         if current_step_id is not None:
@@ -499,6 +504,10 @@ Generate the plan now:
                     if last_result:
                         resolved[key] = self._extract_result_data(last_result)
                         continue
+                    else:
+                        # No previous step available - skip this param with warning
+                        print(f"   [!] No previous step result for '{key}' - param skipped")
+                        continue
 
                 # Handle $stepN references (e.g., $step1, $step2)
                 step_ref = re.search(r'\$step(\d+)', value, re.IGNORECASE)
@@ -510,6 +519,10 @@ Generate the plan now:
                     # If referenced step doesn't exist yet, try last result
                     elif last_result:
                         resolved[key] = self._extract_result_data(last_result)
+                        continue
+                    else:
+                        # Referenced step not available - skip with warning
+                        print(f"   [!] Step {step_num} result not available for '{key}' - param skipped")
                         continue
 
                 # Check for angle bracket placeholders like <contents_of_file>

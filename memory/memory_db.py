@@ -14,6 +14,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 import time
 import json
+import os
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
 
@@ -58,6 +59,10 @@ class HierarchicalMemoryDB:
     
     def __init__(self, db_path="data/embeddings/raec_memory.db"):
         self.db_path = db_path
+        # Ensure parent directory exists before connecting
+        db_dir = os.path.dirname(db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         

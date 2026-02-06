@@ -55,9 +55,13 @@ class Raec:
         # Initialize LLM with swarm routing
         print("[*]  Initializing LLM interface...")
         swarm_config_path = os.path.join(base_dir, "config/swarm_config.json")
+        swarm_config_exists = os.path.exists(swarm_config_path)
+        if not swarm_config_exists:
+            print(f"   [!] Swarm config not found at {swarm_config_path}")
+            print("       Using default model routing (no task-specific routing)")
         self.llm = LLMInterface(
             model=self.config['model']['name'],
-            config_path=swarm_config_path if os.path.exists(swarm_config_path) else None,
+            config_path=swarm_config_path if swarm_config_exists else None,
             use_swarm=True
         )
         print("   [OK] Connected to model:", self.config['model']['name'])
@@ -516,9 +520,20 @@ Provide 5-7 numbered steps showing your reasoning process.
         try:
             result = self.curate_memory(force=False)
             if not result.get('skipped') and result.get('memories_compacted', 0) > 0:
-                print(f"   [OK] Memory curation complete")
+                print(f"   [OK] Memory curation complete: {result.get('memories_compacted', 0)} memories compacted")
         except Exception as e:
+            # Log with more context but don't fail the main task
+            import traceback
             print(f"   [!] Memory curation failed: {e}")
+            print(f"       (This is non-critical - main task continues)")
+            # Store the error for later analysis if needed
+            if not hasattr(self, '_curation_errors'):
+                self._curation_errors = []
+            self._curation_errors.append({
+                'timestamp': time.time(),
+                'error': str(e),
+                'traceback': traceback.format_exc()
+            })
 
     def analyze_performance(self) -> Dict[str, Any]:
         """

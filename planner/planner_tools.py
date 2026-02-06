@@ -144,8 +144,9 @@ class ToolEnabledPlanner:
         )
         
         try:
-            # Generate plan from LLM
-            plan_text = self.llm.generate(prompt, temperature=0.5, max_tokens=2048)
+            # Generate plan from LLM using PLANNING task type for model routing
+            from raec_core.model_swarm import TaskType
+            plan_text = self.llm.generate(prompt, temperature=0.5, max_tokens=2048, task_type=TaskType.PLANNING)
             
             # Parse plan into steps with tool assignments
             steps = self._parse_plan_with_tools(plan_text)
@@ -277,17 +278,22 @@ Generate the plan now:
             # Match PARAMS line
             params_match = re.match(r'PARAMS:\s*(.+)', line, re.IGNORECASE)
             if params_match:
+                params_str = params_match.group(1)
+                parsed_params = None
                 try:
-                    params_str = params_match.group(1)
                     # Try to parse as dict - prefer json.loads for safety
                     import ast
                     try:
-                        current_params = json.loads(params_str)
+                        parsed_params = json.loads(params_str)
                     except json.JSONDecodeError:
                         # Fallback to ast.literal_eval for Python dict syntax
-                        current_params = ast.literal_eval(params_str)
+                        parsed_params = ast.literal_eval(params_str)
                 except (ValueError, SyntaxError) as e:
                     print(f"   [!] Failed to parse PARAMS: {params_str[:50]}... ({e})")
+                    parsed_params = {}  # Use empty dict as fallback
+
+                if parsed_params is not None:
+                    current_params = parsed_params
 
         # Save last step
         if current_step_id is not None:
@@ -458,6 +464,13 @@ Generate the plan now:
                 results['steps'].append(self._step_to_dict(step))
                 print(f"   [X] Failed: {e}\n")
         
+        # Calculate blocked steps
+        blocked_steps = [s for s in steps if s.status == PlanStatus.BLOCKED]
+
+        # Mark as failed if any steps failed or were blocked
+        if failed_steps or blocked_steps:
+            results['success'] = False
+
         # Summary
         print(f"{'='*70}")
         print(f"[#] EXECUTION SUMMARY")
@@ -465,10 +478,10 @@ Generate the plan now:
         print(f"   Total steps: {len(steps)}")
         print(f"   Completed: {len(completed_steps)}")
         print(f"   Failed: {len(failed_steps)}")
-        print(f"   Blocked: {len([s for s in steps if s.status == PlanStatus.BLOCKED])}")
+        print(f"   Blocked: {len(blocked_steps)}")
         print(f"   Success: {results['success']}")
         print()
-        
+
         return results
 
     def _resolve_params(
@@ -640,7 +653,8 @@ Context: {json.dumps(context, indent=2) if context else 'None'}
 
 Provide the result of this step.
 """
-        return self.llm.generate(prompt, temperature=0.6, max_tokens=512)
+        from raec_core.model_swarm import TaskType
+        return self.llm.generate(prompt, temperature=0.6, max_tokens=512, task_type=TaskType.REASONING)
     
     def _step_to_dict(self, step: PlanStep) -> Dict:
         """Convert step to dictionary"""
@@ -715,6 +729,50 @@ Provide the result of this step.
     def _consider_skill_extraction(self, task: str, results: Dict, result_id: int):
         """Consider extracting successful execution as a skill"""
         print(f"[!] Task completed successfully - candidate for skill extraction")
+
+        # Skip if no skills system
+        if not hasattr(self, 'skills') or self.skills is None:
+            return
+
+        # Extract solution pattern from completed steps
+        steps = results.get('steps', [])
+        if not steps:
+            return
+
+        completed_steps = [s for s in steps if s.get('status') == 'completed']
+        if not completed_steps:
+            return
+
+        solution_pattern = "\n".join([
+            f"{s.get('step_id', i+1)}. {s.get('description', 'Unknown')}"
+            + (f" [Tool: {s.get('tool')}]" if s.get('tool') else "")
+            for i, s in enumerate(completed_steps)
+        ])
+
+        # Determine category from task content
+        from skills.skill_graph import SkillCategory
+        task_lower = task.lower()
+        if any(word in task_lower for word in ['parse', 'process', 'transform', 'data', 'filter']):
+            category = SkillCategory.DATA_PROCESSING
+        elif any(word in task_lower for word in ['code', 'write', 'implement', 'function', 'script']):
+            category = SkillCategory.CODE_GENERATION
+        elif any(word in task_lower for word in ['plan', 'break', 'decompose', 'organize']):
+            category = SkillCategory.PLANNING
+        elif any(word in task_lower for word in ['file', 'read', 'write', 'create', 'git', 'push']):
+            category = SkillCategory.TOOL_USAGE
+        else:
+            category = SkillCategory.REASONING
+
+        try:
+            skill_id = self.skills.extract_skill(
+                task_description=task,
+                solution=solution_pattern,
+                execution_result=results,
+                category=category
+            )
+            print(f"   [OK] Skill extracted (ID: {skill_id[:8]}...)")
+        except Exception as e:
+            print(f"   [!] Skill extraction failed: {e}")
 
 
 # Backward compatibility

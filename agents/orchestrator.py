@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 import uuid
 
+# Import TaskType for model swarm routing
+from raec_core.model_swarm import TaskType
+
 
 class AgentRole(Enum):
     """Specialized agent roles"""
@@ -149,7 +152,7 @@ Context: {json.dumps(context, indent=2)}
 
 Provide a numbered plan with clear steps.
 """
-            plan = self.llm.generate(prompt, temperature=0.7)
+            plan = self.llm.generate(prompt, temperature=0.7, task_type=TaskType.PLANNING)
             
             self.conversation_history.append({
                 'role': 'assistant',
@@ -169,8 +172,15 @@ Provide a numbered plan with clear steps.
     def _process_as_executor(self, message: Message, context: Dict) -> Optional[Message]:
         """Process message as an executor agent"""
         if message.message_type == MessageType.TASK:
-            # Execute the task
-            prompt = f"""
+            # Check if we have a tool executor in context
+            tools = context.get('tools')
+
+            if tools:
+                # Execute using actual tools
+                result = self._execute_with_tools(message.content, tools, context)
+            else:
+                # Fallback to LLM reasoning
+                prompt = f"""
 You are an execution agent. Complete the following task:
 
 Task: {message.content}
@@ -179,10 +189,10 @@ Available tools: {self.capabilities}
 
 Describe your execution approach and results.
 """
-            result = self.llm.generate(prompt, temperature=0.5)
-            
+                result = self.llm.generate(prompt, temperature=0.5, task_type=TaskType.REASONING)
+
             self.state.tasks_completed += 1
-            
+
             return Message.create(
                 sender=self.agent_id,
                 receiver=message.sender,
@@ -190,8 +200,54 @@ Describe your execution approach and results.
                 content=result,
                 completed=True
             )
-        
+
         return None
+
+    def _execute_with_tools(self, task: str, tools, context: Dict) -> str:
+        """Execute task using actual tool executor"""
+        # Generate tool execution plan
+        tools_doc = tools.get_tools_for_llm() if hasattr(tools, 'get_tools_for_llm') else str(self.capabilities)
+
+        prompt = f"""
+You are an execution agent with access to real tools. Parse this task and determine what tools to use.
+
+Task: {task}
+
+Available Tools:
+{tools_doc}
+
+Respond with the tool to use in this format:
+TOOL: category.tool_name
+PARAMS: {{"param1": "value1"}}
+
+If no tool is appropriate, respond with:
+NO_TOOL: [reasoning explanation]
+"""
+        response = self.llm.generate(prompt, temperature=0.3, task_type=TaskType.TOOL_SELECTION)
+
+        # Parse tool call from response
+        import re
+        tool_match = re.search(r'TOOL:\s*(\w+)\.(\w+)', response, re.IGNORECASE)
+        params_match = re.search(r'PARAMS:\s*(\{[^}]+\})', response, re.IGNORECASE)
+
+        if tool_match:
+            tool_key = f"{tool_match.group(1)}.{tool_match.group(2)}"
+            params = {}
+            if params_match:
+                try:
+                    import ast
+                    params = ast.literal_eval(params_match.group(1))
+                except:
+                    pass
+
+            # Execute the tool
+            try:
+                result = tools.execute(tool_key, **params)
+                return f"Tool executed: {tool_key}\nResult: {result}"
+            except Exception as e:
+                return f"Tool execution failed: {tool_key}\nError: {e}"
+        else:
+            return f"LLM Analysis: {response}"
     
     def _process_as_critic(self, message: Message, context: Dict) -> Optional[Message]:
         """Process message as a critic/reviewer agent"""
@@ -209,9 +265,10 @@ Provide constructive criticism and suggest improvements. Be specific about:
 2. What could be improved
 3. Any errors or issues
 
+IMPORTANT: You MUST start your response with either [APPROVE] or [REVISE].
 Format: [APPROVE] or [REVISE] followed by your critique.
 """
-            critique = self.llm.generate(prompt, temperature=0.3)
+            critique = self.llm.generate(prompt, temperature=0.3, task_type=TaskType.REASONING)
             
             # Determine if approved
             approved = critique.strip().startswith('[APPROVE]')
@@ -239,7 +296,7 @@ Context: {json.dumps(context, indent=2)}
 
 Provide a detailed, well-sourced answer.
 """
-            research = self.llm.generate(prompt, temperature=0.6)
+            research = self.llm.generate(prompt, temperature=0.6, task_type=TaskType.REASONING)
             
             return Message.create(
                 sender=self.agent_id,
@@ -262,7 +319,7 @@ You are a synthesis agent. Combine and summarize the following information:
 
 Create a coherent, comprehensive summary.
 """
-            synthesis = self.llm.generate(prompt, temperature=0.5)
+            synthesis = self.llm.generate(prompt, temperature=0.5, task_type=TaskType.SYNTHESIS)
             
             return Message.create(
                 sender=self.agent_id,
@@ -283,7 +340,7 @@ Message from {message.sender}: {message.content}
 
 How do you respond?
 """
-        response = self.llm.generate(prompt, temperature=0.6)
+        response = self.llm.generate(prompt, temperature=0.6, task_type=TaskType.REASONING)
         
         return Message.create(
             sender=self.agent_id,
@@ -390,16 +447,18 @@ class MultiAgentOrchestrator:
         self,
         workflow_name: str,
         initial_task: str,
-        required_roles: Optional[List[AgentRole]] = None
+        required_roles: Optional[List[AgentRole]] = None,
+        tools=None
     ) -> Dict[str, Any]:
         """
         Execute a collaborative workflow
-        
+
         Args:
             workflow_name: Name of the workflow
             initial_task: Starting task
             required_roles: Agents needed for the workflow
-            
+            tools: Optional ToolExecutor for real tool execution
+
         Returns:
             Workflow results
         """
@@ -407,7 +466,7 @@ class MultiAgentOrchestrator:
         print(f"[&] EXECUTING MULTI-AGENT WORKFLOW: {workflow_name}")
         print(f"{'='*70}\n")
         print(f"Task: {initial_task}\n")
-        
+
         # Ensure required agents exist
         if required_roles:
             for role in required_roles:
@@ -418,7 +477,8 @@ class MultiAgentOrchestrator:
         self.shared_context['workflow'] = workflow_name
         self.shared_context['initial_task'] = initial_task
         self.shared_context['start_time'] = time.time()
-        
+        self.shared_context['tools'] = tools  # Pass tools for executor agent
+
         # Clear message bus
         self.message_bus = []
         

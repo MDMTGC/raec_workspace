@@ -322,11 +322,12 @@ Based on the execution data, provide a direct, concise response.
         """
         print("[=] MODE: Collaborative Multi-Agent\n")
         
-        # Use multi-agent orchestrator
+        # Use multi-agent orchestrator with tools for real execution
         workflow_result = self.orchestrator.execute_workflow(
             workflow_name="collaborative_task",
             initial_task=task,
-            required_roles=[AgentRole.PLANNER, AgentRole.EXECUTOR, AgentRole.CRITIC]
+            required_roles=[AgentRole.PLANNER, AgentRole.EXECUTOR, AgentRole.CRITIC],
+            tools=self.tools  # Pass tools so executor can actually execute
         )
         
         # Store workflow in memory

@@ -285,15 +285,17 @@ class CodeTools:
             return f"Execution error: {e}"
     
     @staticmethod
-    def run_shell(command: str, timeout: int = 10) -> str:
-        """Execute shell command"""
+    def run_shell(command: str, timeout: int = 10, cwd: str = None) -> str:
+        """Execute shell command, optionally in a specified working directory"""
         try:
+            work_dir = cwd or os.getcwd()
             result = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                cwd=work_dir
             )
             
             if result.returncode == 0:

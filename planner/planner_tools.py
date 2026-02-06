@@ -205,8 +205,13 @@ class ToolEnabledPlanner:
 **Common Patterns:**
 - List files: TOOL: file.list_directory, PARAMS: {"dirpath": "."}
 - Read file: TOOL: file.read_file, PARAMS: {"filepath": "filename.py"}
+- Write file: TOOL: file.write_file, PARAMS: {"filepath": "path/to/file.md", "content": "file content here"}
 - Analyze code: TOOL: code.validate_python, PARAMS: {"code": "$step2"}
 - Run code: TOOL: code.run_python, PARAMS: {"code": "print('hello')"}
+- Run shell/git: TOOL: code.run_shell, PARAMS: {"command": "git add file.txt", "cwd": "/path/to/repo"}
+- Git commit: TOOL: code.run_shell, PARAMS: {"command": "git commit -m 'message'", "cwd": "/path/to/repo"}
+- Git push: TOOL: code.run_shell, PARAMS: {"command": "git push origin main", "cwd": "/path/to/repo"}
+- Change directory: TOOL: system.change_dir, PARAMS: {"path": "/path/to/directory"}
 - Count items: TOOL: data.count, PARAMS: {"data": "$step1"}
 - Filter list: TOOL: data.filter_list, PARAMS: {"data": "$step1", "condition": ".py"}
 

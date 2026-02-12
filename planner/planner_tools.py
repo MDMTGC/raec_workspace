@@ -204,9 +204,11 @@ class ToolEnabledPlanner:
    PARAMS: {"param": "$step1"}
 
 **Common Patterns:**
+- Get desktop path: TOOL: system.get_desktop_path, PARAMS: {}
+- Get home directory: TOOL: system.get_home_dir, PARAMS: {}
 - List files: TOOL: file.list_directory, PARAMS: {"dirpath": "."}
 - Read file: TOOL: file.read_file, PARAMS: {"filepath": "filename.py"}
-- Write file: TOOL: file.write_file, PARAMS: {"filepath": "path/to/file.md", "content": "file content here"}
+- Write file (use full path): TOOL: file.write_file, PARAMS: {"filepath": "C:/Users/name/Desktop/file.txt", "content": "content"}
 - Analyze code: TOOL: code.validate_python, PARAMS: {"code": "$step2"}
 - Run code: TOOL: code.run_python, PARAMS: {"code": "print('hello')"}
 - Run shell/git: TOOL: code.run_shell, PARAMS: {"command": "git add file.txt", "cwd": "/path/to/repo"}
@@ -215,6 +217,8 @@ class ToolEnabledPlanner:
 - Change directory: TOOL: system.change_dir, PARAMS: {"path": "/path/to/directory"}
 - Count items: TOOL: data.count, PARAMS: {"data": "$step1"}
 - Filter list: TOOL: data.filter_list, PARAMS: {"data": "$step1", "condition": ".py"}
+
+**For desktop file operations:** First use system.get_desktop_path to get the path, then construct the full filepath by appending the filename.
 
 **IMPORTANT:** If you cannot accomplish a step with available tools, describe it WITHOUT a TOOL line and the system will use LLM reasoning instead.
 
@@ -430,24 +434,44 @@ Generate the plan now:
                         tool_key,
                         **resolved_params
                     )
-                    
-                    step.result = str(step_result)
-                    step.status = PlanStatus.COMPLETED
-                    print(f"   [OK] Result: {str(step_result)[:100]}...")
+
+                    # Check ToolResult.success flag - don't assume success!
+                    if step_result.success:
+                        # Store just the output value, not the full ToolResult
+                        step.result = step_result.output
+                        step.status = PlanStatus.COMPLETED
+                        step.end_time = time.time()
+                        completed_steps.add(step.step_id)
+                        step_results[step.step_id] = step_result.output  # Store output directly
+                        results['steps'].append(self._step_to_dict(step))
+                        print(f"   [OK] Result: {str(step_result.output)[:100]}...")
+                        print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
+                    else:
+                        # Tool execution failed
+                        step.status = PlanStatus.FAILED
+                        step.error = step_result.error or str(step_result.output)
+                        step.result = step_result.output
+                        step.end_time = time.time()
+                        failed_steps.add(step.step_id)
+                        results['success'] = False
+                        results['errors'].append({
+                            'step_id': step.step_id,
+                            'error': step.error
+                        })
+                        results['steps'].append(self._step_to_dict(step))
+                        print(f"   [X] Tool failed: {step.error}\n")
                 else:
                     # No tool specified - use LLM to execute
                     print(f"   [R] Using LLM reasoning")
                     step_result = self._execute_step_with_llm(step, task, step_results, context)
                     step.result = step_result
                     step.status = PlanStatus.COMPLETED
+                    step.end_time = time.time()
+                    completed_steps.add(step.step_id)
+                    step_results[step.step_id] = step.result
+                    results['steps'].append(self._step_to_dict(step))
                     print(f"   [OK] Completed")
-                
-                step.end_time = time.time()
-                completed_steps.add(step.step_id)
-                step_results[step.step_id] = step.result
-                
-                results['steps'].append(self._step_to_dict(step))
-                print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
+                    print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
                 
             except Exception as e:
                 step.status = PlanStatus.FAILED
@@ -561,79 +585,23 @@ Generate the plan now:
 
         return resolved
 
-    def _extract_result_data(self, result_str: str) -> Any:
-        """Extract actual data from a ToolResult string or return as-is"""
-        import re
-        import ast
+    def _extract_result_data(self, result) -> Any:
+        """
+        Extract usable data from a step result.
 
-        result_str = str(result_str)
+        Since we now store step_result.output directly (not str(step_result)),
+        this method is much simpler - it just returns the data as-is in most cases.
+        """
+        # If None, return None
+        if result is None:
+            return None
 
-        # Try to extract output from ToolResult string
-        if 'output=' in result_str:
-            # Find the output= part and extract the value
-            output_start = result_str.find('output=')
-            if output_start != -1:
-                rest = result_str[output_start + 7:]  # After 'output='
+        # If already a useful type (list, dict, int, float), return as-is
+        if isinstance(result, (list, dict, int, float, bool)):
+            return result
 
-                # Handle None
-                if rest.startswith('None'):
-                    return None
-
-                # Handle list [...] - match balanced brackets
-                if rest.startswith('['):
-                    bracket_count = 0
-                    end_idx = 0
-                    for i, char in enumerate(rest):
-                        if char == '[':
-                            bracket_count += 1
-                        elif char == ']':
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                end_idx = i + 1
-                                break
-                    if end_idx > 0:
-                        list_str = rest[:end_idx]
-                        try:
-                            return ast.literal_eval(list_str)
-                        except:
-                            return list_str
-
-                # Handle string '...' - find matching quote
-                if rest.startswith("'"):
-                    end_idx = 1
-                    while end_idx < len(rest):
-                        if rest[end_idx] == "'" and (end_idx == 1 or rest[end_idx-1] != '\\'):
-                            break
-                        end_idx += 1
-                    if end_idx < len(rest):
-                        return rest[1:end_idx]
-
-                # Handle dict {...} - match balanced braces
-                if rest.startswith('{'):
-                    brace_count = 0
-                    end_idx = 0
-                    for i, char in enumerate(rest):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                end_idx = i + 1
-                                break
-                    if end_idx > 0:
-                        dict_str = rest[:end_idx]
-                        try:
-                            return ast.literal_eval(dict_str)
-                        except:
-                            return dict_str
-
-                # Handle number
-                num_match = re.match(r'^(\d+(?:\.\d+)?)', rest)
-                if num_match:
-                    num_str = num_match.group(1)
-                    return float(num_str) if '.' in num_str else int(num_str)
-
-        return result_str
+        # For strings, return as-is (this is the common case now)
+        return result
 
     def _execute_step_with_llm(
         self,

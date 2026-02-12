@@ -421,7 +421,18 @@ class SystemTools:
     def get_current_dir() -> str:
         """Get current working directory"""
         return os.getcwd()
-    
+
+    @staticmethod
+    def get_home_dir() -> str:
+        """Get user home directory (cross-platform: works on Windows, Mac, Linux)"""
+        return os.path.expanduser("~")
+
+    @staticmethod
+    def get_desktop_path() -> str:
+        """Get user desktop path (cross-platform)"""
+        home = os.path.expanduser("~")
+        return os.path.join(home, "Desktop")
+
     @staticmethod
     def change_dir(path: str) -> str:
         """Change working directory"""

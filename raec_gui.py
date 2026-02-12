@@ -1,6 +1,6 @@
 """
 RAEC GUI - Unified Control Interface
-Enhanced version with stats, mode selection, and improved UX
+Enhanced with identity, conversation persistence, and intent routing
 """
 import customtkinter as ctk
 import threading
@@ -44,12 +44,12 @@ class StatsPanel(ctk.CTkFrame):
 
         self.stat_labels = {}
         stats = [
+            ("session", "Session", "-"),
+            ("trust", "Trust", "new"),
+            ("interactions", "Interactions", "0"),
             ("memory", "Memory", "0"),
             ("skills", "Skills", "0"),
             ("tools", "Tools", "0"),
-            ("agents", "Agents", "0"),
-            ("verifications", "Verified", "0"),
-            ("swarm", "Swarm", "-"),
         ]
 
         for key, label, default in stats:
@@ -90,21 +90,23 @@ class StatsPanel(ctk.CTkFrame):
                 self.stat_labels['tools'].configure(
                     text=str(stats['tools'].get('total_tools', 0))
                 )
-
-            if 'agents' in stats:
-                self.stat_labels['agents'].configure(
-                    text=str(stats['agents'].get('total_agents', 0))
-                )
-
-            if 'verification' in stats:
-                total = stats['verification'].get('total_verifications', 0)
-                self.stat_labels['verifications'].configure(text=str(total))
-
-            if 'swarm' in stats and stats['swarm']:
-                models = len(stats['swarm'].get('available_models', []))
-                self.stat_labels['swarm'].configure(text=f"{models} models")
         except Exception as e:
             print(f"Stats update error: {e}")
+
+    def update_identity(self, core):
+        """Update identity/conversation stats from core"""
+        try:
+            if hasattr(core, 'conversation') and core.conversation.current_session:
+                session_id = core.conversation.current_session.session_id
+                self.stat_labels['session'].configure(text=session_id[:8])
+
+            if hasattr(core, 'identity'):
+                trust = core.identity.identity.trust_level
+                interactions = core.identity.identity.interactions_count
+                self.stat_labels['trust'].configure(text=trust)
+                self.stat_labels['interactions'].configure(text=str(interactions))
+        except Exception as e:
+            print(f"Identity update error: {e}")
 
 
 class RaecGUI(ctk.CTk):
@@ -162,10 +164,10 @@ class RaecGUI(ctk.CTk):
         self.input_frame.grid_columnconfigure(1, weight=1)
 
         # Mode selector
-        self.mode_var = ctk.StringVar(value="standard")
+        self.mode_var = ctk.StringVar(value="auto")
         self.mode_menu = ctk.CTkOptionMenu(
             self.input_frame,
-            values=["standard", "collaborative", "incremental"],
+            values=["auto", "standard", "collaborative", "incremental"],
             variable=self.mode_var,
             width=130,
             height=40,
@@ -251,11 +253,19 @@ class RaecGUI(ctk.CTk):
 
         self.mode_label = ctk.CTkLabel(
             self.status_frame,
-            text="Mode: standard",
+            text="Mode: auto",
             font=("JetBrains Mono", 10),
             text_color="#444444"
         )
         self.mode_label.pack(side="right", padx=20, pady=5)
+
+        self.intent_label = ctk.CTkLabel(
+            self.status_frame,
+            text="",
+            font=("JetBrains Mono", 10),
+            text_color="#666666"
+        )
+        self.intent_label.pack(side="right", padx=10, pady=5)
 
     def _bind_events(self):
         """Bind keyboard and window events"""
@@ -374,9 +384,15 @@ class RaecGUI(ctk.CTk):
     def _execute(self, cmd: str, mode: str):
         """Execute command in background thread"""
         self._set_executing(True)
-        self._set_status(f"Executing ({mode})...", "#FFAA00")
+        self._set_status(f"Processing...", "#FFAA00")
 
         try:
+            # Capture intent before execution for display
+            if hasattr(self.core, 'intent_classifier'):
+                classification = self.core.intent_classifier.classify(cmd)
+                intent_str = f"Intent: {classification.intent.value} ({classification.confidence:.0%})"
+                self.after(0, lambda: self.intent_label.configure(text=intent_str))
+
             result = self.core.process_input(cmd, mode=mode)
             self.update_log(f"RAEC >> {result}")
             self._set_status("Ready", "#00AA00")
@@ -408,6 +424,7 @@ class RaecGUI(ctk.CTk):
                 stats = self.core.analyze_performance()
 
             self.stats_panel.update_stats(stats)
+            self.stats_panel.update_identity(self.core)
         except Exception as e:
             print(f"Stats refresh error: {e}")
 

@@ -21,33 +21,28 @@ class FileTools:
     
     @staticmethod
     def read_file(filepath: str) -> str:
-        """Read a text file"""
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return f.read()
-        except Exception as e:
-            return f"Error reading file: {e}"
+        """Read a text file. Raises exception on failure."""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
     
     @staticmethod
     def write_file(filepath: str, content: str) -> str:
-        """Write content to a file"""
-        try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(content)
-            return f"Successfully wrote {len(content)} bytes to {filepath}"
-        except Exception as e:
-            return f"Error writing file: {e}"
+        """Write content to a file. Raises exception on failure."""
+        # Handle directory creation only if there's a directory component
+        dir_path = os.path.dirname(filepath)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return f"Successfully wrote {len(content)} bytes to {filepath}"
     
     @staticmethod
     def append_file(filepath: str, content: str) -> str:
-        """Append content to a file"""
-        try:
-            with open(filepath, 'a', encoding='utf-8') as f:
-                f.write(content)
-            return f"Successfully appended to {filepath}"
-        except Exception as e:
-            return f"Error appending to file: {e}"
+        """Append content to a file. Raises exception on failure."""
+        with open(filepath, 'a', encoding='utf-8') as f:
+            f.write(content)
+        return f"Successfully appended to {filepath}"
     
     @staticmethod
     def list_directory(dirpath: str) -> str:
@@ -432,6 +427,24 @@ class SystemTools:
         """Get user desktop path (cross-platform)"""
         home = os.path.expanduser("~")
         return os.path.join(home, "Desktop")
+
+    @staticmethod
+    def join_path(base: str, parts: Any = None, *extra_parts: str) -> str:
+        """Join path components together (cross-platform).
+
+        Args:
+            base: The base directory path
+            parts: Either a single path component string, or a list of components
+            extra_parts: Additional path components (variadic)
+        """
+        all_parts = []
+        if parts is not None:
+            if isinstance(parts, list):
+                all_parts.extend(parts)
+            else:
+                all_parts.append(str(parts))
+        all_parts.extend(extra_parts)
+        return os.path.join(base, *all_parts)
 
     @staticmethod
     def change_dir(path: str) -> str:

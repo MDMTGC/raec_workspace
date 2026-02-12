@@ -206,9 +206,10 @@ class ToolEnabledPlanner:
 **Common Patterns:**
 - Get desktop path: TOOL: system.get_desktop_path, PARAMS: {}
 - Get home directory: TOOL: system.get_home_dir, PARAMS: {}
+- Join paths: TOOL: system.join_path, PARAMS: {"base": "$step1", "parts": "filename.txt"}
 - List files: TOOL: file.list_directory, PARAMS: {"dirpath": "."}
 - Read file: TOOL: file.read_file, PARAMS: {"filepath": "filename.py"}
-- Write file (use full path): TOOL: file.write_file, PARAMS: {"filepath": "C:/Users/name/Desktop/file.txt", "content": "content"}
+- Write file: TOOL: file.write_file, PARAMS: {"filepath": "$step2", "content": "content here"}
 - Analyze code: TOOL: code.validate_python, PARAMS: {"code": "$step2"}
 - Run code: TOOL: code.run_python, PARAMS: {"code": "print('hello')"}
 - Run shell/git: TOOL: code.run_shell, PARAMS: {"command": "git add file.txt", "cwd": "/path/to/repo"}
@@ -218,7 +219,21 @@ class ToolEnabledPlanner:
 - Count items: TOOL: data.count, PARAMS: {"data": "$step1"}
 - Filter list: TOOL: data.filter_list, PARAMS: {"data": "$step1", "condition": ".py"}
 
-**For desktop file operations:** First use system.get_desktop_path to get the path, then construct the full filepath by appending the filename.
+**For desktop/directory file operations:**
+1. Use system.get_desktop_path to get the directory path
+2. Use system.join_path to combine directory + filename
+3. Use file.write_file with the full path from step 2
+
+Example for creating Desktop/Test.txt:
+1. Get desktop path
+   TOOL: system.get_desktop_path
+   PARAMS: {}
+2. Construct full filepath [DEPENDS: 1]
+   TOOL: system.join_path
+   PARAMS: {"base": "$step1", "parts": "Test.txt"}
+3. Write file [DEPENDS: 2]
+   TOOL: file.write_file
+   PARAMS: {"filepath": "$step2", "content": "file content here"}
 
 **IMPORTANT:** If you cannot accomplish a step with available tools, describe it WITHOUT a TOOL line and the system will use LLM reasoning instead.
 

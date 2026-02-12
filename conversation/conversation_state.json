@@ -1,0 +1,32 @@
+{
+  "current_session": {
+    "session_id": "bef88d28",
+    "start_time": 1770913577.3044045,
+    "messages": [],
+    "summary": null,
+    "key_topics": [],
+    "outcomes": []
+  },
+  "recent_sessions": [
+    {
+      "session_id": "be88465b",
+      "start_time": 1770913076.315312,
+      "end_time": 1770913415.4945161,
+      "message_count": 14,
+      "summary": "Session be88465b: 14 messages exchanged. Topics: What can you do?.",
+      "key_topics": [
+        "What can you do?"
+      ],
+      "outcomes": []
+    },
+    {
+      "session_id": "0cee693a",
+      "start_time": 1770913415.4958656,
+      "end_time": 1770913577.3031142,
+      "message_count": 4,
+      "summary": "Session 0cee693a: 4 messages exchanged.",
+      "key_topics": [],
+      "outcomes": []
+    }
+  ]
+}

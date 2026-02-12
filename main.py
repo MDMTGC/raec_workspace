@@ -7,6 +7,8 @@ Fixed Integration:
 - Method calls aligned
 - Proper error handling
 - Three execution modes working
+- Identity and conversation persistence
+- Intent classification for routing
 """
 import sys
 import os
@@ -28,6 +30,10 @@ from tools.executor import ToolExecutor, ToolType
 from agents.orchestrator import MultiAgentOrchestrator, AgentRole
 from evaluators.logic_checker import LogicChecker, VerificationLevel
 from raec_core.core_rules import CoreRulesEngine
+
+# Identity and conversation systems
+from identity import SelfModel
+from conversation import ConversationManager, IntentClassifier, Intent
 
 
 class Raec:
@@ -100,6 +106,20 @@ class Raec:
         # Core Rules Engine (immutable constraint layer)
         self.rules = CoreRulesEngine()
         print("   [OK] Core Rules Engine active")
+
+        # Identity system (persistent personality)
+        identity_path = os.path.join(base_dir, "identity/identity.json")
+        self.identity = SelfModel(identity_path=identity_path)
+        print(f"   [OK] Identity loaded: {self.identity.identity.name}")
+
+        # Conversation manager (session continuity)
+        conv_path = os.path.join(base_dir, "conversation/conversation_state.json")
+        self.conversation = ConversationManager(state_path=conv_path)
+        print(f"   [OK] Conversation manager active (session: {self.conversation.current_session.session_id})")
+
+        # Intent classifier (routing)
+        self.intent_classifier = IntentClassifier()
+        print("   [OK] Intent classifier ready")
         
         # Planner (integrates memory, skills, and tools)
         self.planner = Planner(
@@ -147,42 +167,221 @@ class Raec:
             description="Reviews and validates work quality"
         )
     
-    def process_input(self, task: str, mode: str = "standard") -> str:
+    def process_input(self, user_input: str, mode: str = "auto") -> str:
         """
-        Main entry point for processing user input
-        
+        Main entry point for processing user input.
+
+        Routes input based on intent classification:
+        - CHAT: Conversational response using personality
+        - QUERY: Information retrieval response
+        - TASK: Full planning and execution
+        - META: System commands about RAEC itself
+
         Args:
-            task: User's task
-            mode: Execution mode (standard, collaborative, incremental)
-            
+            user_input: User's message
+            mode: Execution mode (auto, standard, collaborative, incremental)
+
         Returns:
             Result string
         """
+        # Track conversation
+        self.conversation.add_user_message(user_input)
+        self.identity.record_interaction()
+
+        # Classify intent
+        classification = self.intent_classifier.classify(user_input)
+        intent = classification.intent
+
+        print(f"\n[?] Intent: {intent.value} (confidence: {classification.confidence:.0%})")
+
+        # Route based on intent
+        if intent == Intent.CHAT:
+            response = self._handle_chat(user_input)
+        elif intent == Intent.QUERY:
+            response = self._handle_query(user_input)
+        elif intent == Intent.META:
+            response = self._handle_meta(user_input)
+        else:  # Intent.TASK
+            response = self._handle_task(user_input, mode if mode != "auto" else "standard")
+
+        # Track response
+        self.conversation.add_assistant_message(response)
+        self.conversation.save()
+        self.identity.save()
+
+        return response
+
+    def _handle_chat(self, user_input: str) -> str:
+        """Handle casual conversation"""
+        identity_context = self.identity.get_system_prompt_context()
+        recent_messages = self.conversation.get_context_messages(limit=5)
+
+        # Build conversation context
+        conv_context = "\n".join([
+            f"{m['role']}: {m['content'][:200]}"
+            for m in recent_messages[:-1]  # Exclude current message
+        ])
+
+        prompt = f"""{identity_context}
+
+Recent conversation:
+{conv_context}
+
+User: {user_input}
+
+Respond naturally and briefly as RAEC. Be conversational but concise.
+"""
+        return self.llm.generate(prompt, temperature=0.7, max_tokens=256)
+
+    def _handle_query(self, user_input: str) -> str:
+        """Handle information requests"""
+        identity_context = self.identity.get_system_prompt_context()
+
+        # Check memory for relevant facts
+        relevant_memories = self.memory.query(user_input, k=3)
+        memory_context = ""
+        if relevant_memories:
+            memory_context = "\nRelevant knowledge:\n" + "\n".join([
+                f"- {m['content'][:150]}" for m in relevant_memories
+            ])
+
+        prompt = f"""{identity_context}
+{memory_context}
+
+Question: {user_input}
+
+Provide a helpful, accurate answer. Be direct and concise.
+"""
+        response = self.llm.generate(prompt, temperature=0.5, max_tokens=512)
+
+        # Track topic
+        self.conversation.add_topic(user_input[:50])
+
+        return response
+
+    def _handle_meta(self, user_input: str) -> str:
+        """Handle system commands about RAEC"""
+        input_lower = user_input.lower()
+
+        # Direct meta commands
+        if '/help' in input_lower:
+            return self._get_help_text()
+        elif '/status' in input_lower:
+            return self._get_status_text()
+        elif '/skills' in input_lower:
+            return self._get_skills_text()
+        elif 'who are you' in input_lower or 'what are you' in input_lower:
+            return self._get_identity_text()
+        elif 'what can you do' in input_lower:
+            return self._get_capabilities_text()
+        else:
+            # General meta query
+            identity_context = self.identity.get_system_prompt_context()
+            prompt = f"""{identity_context}
+
+The user is asking about RAEC itself: {user_input}
+
+Respond helpfully about your capabilities, identity, or status as appropriate.
+"""
+            return self.llm.generate(prompt, temperature=0.5, max_tokens=256)
+
+    def _handle_task(self, task: str, mode: str) -> str:
+        """Handle action/execution requests"""
         # Execute with specified mode
         full_task = f"{self.logic_directive}\n\nTask: {task}"
         result = self.execute_task(full_task, mode=mode)
-        
+
         if not result.get('success'):
             return f"Error: {result.get('error', 'Execution failed')}"
 
-        # Synthesize output - confirm what was done, don't give instructions
+        # Track outcome
+        self.conversation.add_outcome(f"Completed: {task[:50]}")
+
+        # Synthesize output - confirm what was done
         steps_completed = [s for s in result.get('steps', []) if s.get('status') == 'completed']
         step_summary = "\n".join([
             f"- {s.get('description', 'Unknown step')}: {str(s.get('result', ''))[:100]}"
             for s in steps_completed
         ])
 
-        synthesis_prompt = f"""
+        identity_context = self.identity.get_system_prompt_context()
+        synthesis_prompt = f"""{identity_context}
+
 Task requested: {task}
 Status: COMPLETED SUCCESSFULLY
 Steps executed:
 {step_summary}
 
 Provide a SHORT confirmation (1-2 sentences) of what was accomplished.
-Start with "Done:" or "Completed:". Do NOT give instructions on how to do it - the task is already finished.
+Start with "Done:" or "Completed:". Do NOT give instructions - the task is finished.
 """
 
         return self.llm.generate(synthesis_prompt, temperature=0.5, max_tokens=256)
+
+    def _get_help_text(self) -> str:
+        """Return help text"""
+        return """RAEC - Reflective Agentic Ecosystem Composer
+
+Commands:
+  /help     - Show this help
+  /status   - System status
+  /skills   - List learned skills
+
+Modes:
+  standard      - Normal planning and execution
+  collaborative - Multi-agent workflow
+  incremental   - Step-by-step with verification
+
+Just tell me what you need - I'll figure out how to help."""
+
+    def _get_status_text(self) -> str:
+        """Return system status"""
+        skill_stats = self.skills.get_stats()
+        memory_count = len(self.memory.get_recent_by_type(MemoryType.EXPERIENCE, limit=1000))
+        session_msgs = self.conversation.message_count()
+
+        return f"""RAEC Status:
+  Session: {self.conversation.current_session.session_id}
+  Messages this session: {session_msgs}
+  Trust level: {self.identity.identity.trust_level}
+  Total interactions: {self.identity.identity.interactions_count}
+  Skills: {skill_stats['total_skills']} ({skill_stats['verified_count']} verified)
+  Experiences: {memory_count}"""
+
+    def _get_skills_text(self) -> str:
+        """Return skills summary"""
+        skill_stats = self.skills.get_stats()
+        return f"""Skills: {skill_stats['total_skills']} total
+  Verified: {skill_stats['verified_count']}
+  Avg confidence: {skill_stats['avg_confidence']:.0%}
+  Total uses: {skill_stats['total_usage']}"""
+
+    def _get_identity_text(self) -> str:
+        """Return identity information"""
+        identity = self.identity.identity
+        name = identity.name
+        traits = identity.traits
+        values = identity.core_values
+
+        return f"""I'm {name} - Reflective Agentic Ecosystem Composer.
+
+Traits: {', '.join(traits)}
+Core values: {', '.join(values)}
+
+I'm designed to be a persistent, evolving AI assistant that learns from our interactions and adapts over time."""
+
+    def _get_capabilities_text(self) -> str:
+        """Return capabilities information"""
+        return """I can help with:
+
+• File operations - create, read, write, organize files
+• Code execution - run Python scripts, shell commands
+• Planning - break down complex tasks into steps
+• Learning - remember patterns and improve over time
+• Web requests - fetch data, interact with APIs
+• Data processing - parse, transform, analyze data
+
+Just describe what you need and I'll plan the approach."""
     
     def execute_task(
         self,
@@ -634,10 +833,73 @@ Provide 5-7 numbered steps showing your reasoning process.
             'swarm': swarm_stats
         }
     
+    def reflect(self, trigger: str = "session_end") -> Optional[str]:
+        """
+        Self-reflection after significant interactions.
+
+        Analyzes recent interactions and updates identity/beliefs accordingly.
+
+        Args:
+            trigger: What triggered the reflection (session_end, error, milestone)
+
+        Returns:
+            Reflection insight if any
+        """
+        recent_messages = self.conversation.get_context_messages(limit=10)
+        if len(recent_messages) < 3:
+            return None
+
+        # Build reflection prompt
+        conversation_summary = "\n".join([
+            f"{m['role']}: {m['content'][:100]}"
+            for m in recent_messages
+        ])
+
+        prompt = f"""Analyze this recent interaction as RAEC:
+
+{conversation_summary}
+
+Consider:
+1. What went well?
+2. What could be improved?
+3. Any patterns or preferences to remember?
+
+Provide ONE brief insight (1-2 sentences) worth remembering.
+If nothing notable, respond with "No significant insight."
+"""
+
+        insight = self.llm.generate(prompt, temperature=0.5, max_tokens=128)
+
+        if "no significant insight" not in insight.lower():
+            self.identity.add_reflection(
+                trigger=trigger,
+                insight=insight,
+                category="interaction",
+                impact="low"
+            )
+            return insight
+
+        return None
+
     def close(self):
-        """Clean shutdown"""
+        """Clean shutdown with state persistence"""
+        # Run final reflection
+        insight = self.reflect(trigger="session_end")
+        if insight:
+            print(f"\n[~] Session reflection: {insight}")
+
+        # End conversation session
+        self.conversation.end_session(
+            summary=self.conversation.get_conversation_summary(),
+            outcomes=self.conversation.current_session.outcomes if self.conversation.current_session else []
+        )
+
+        # Save all state
+        self.identity.save()
+        self.conversation.save()
         self.memory.close()
-        print("\n[OK] Raec system shutdown complete")
+
+        print("\n[OK] Raec system shutdown complete (state saved)")
 
 
 def main():

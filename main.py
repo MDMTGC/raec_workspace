@@ -121,6 +121,7 @@ class Raec:
         # Memory curation settings
         self._memory_curation_threshold = 50  # Curate after this many experiences
         self._last_curation_count = 0
+        self._curation_errors = []  # Track non-critical errors for later review
 
         print("\n" + "="*70)
         print("[OK] RAEC SYSTEM ONLINE")
@@ -163,16 +164,25 @@ class Raec:
         
         if not result.get('success'):
             return f"Error: {result.get('error', 'Execution failed')}"
-        
-        # Synthesize output
-        synthesis_prompt = f"""
-Task: {task}
-Execution Data: {str(result.get('steps', []))[:500]}
 
-Based on the execution data, provide a direct, concise response.
+        # Synthesize output - confirm what was done, don't give instructions
+        steps_completed = [s for s in result.get('steps', []) if s.get('status') == 'completed']
+        step_summary = "\n".join([
+            f"- {s.get('description', 'Unknown step')}: {str(s.get('result', ''))[:100]}"
+            for s in steps_completed
+        ])
+
+        synthesis_prompt = f"""
+Task requested: {task}
+Status: COMPLETED SUCCESSFULLY
+Steps executed:
+{step_summary}
+
+Provide a SHORT confirmation (1-2 sentences) of what was accomplished.
+Start with "Done:" or "Completed:". Do NOT give instructions on how to do it - the task is already finished.
 """
-        
-        return self.llm.generate(synthesis_prompt, temperature=0.5, max_tokens=512)
+
+        return self.llm.generate(synthesis_prompt, temperature=0.5, max_tokens=256)
     
     def execute_task(
         self,
@@ -527,9 +537,7 @@ Provide 5-7 numbered steps showing your reasoning process.
             import traceback
             print(f"   [!] Memory curation failed: {e}")
             print(f"       (This is non-critical - main task continues)")
-            # Store the error for later analysis if needed
-            if not hasattr(self, '_curation_errors'):
-                self._curation_errors = []
+            # Store the error for later analysis
             self._curation_errors.append({
                 'timestamp': time.time(),
                 'error': str(e),

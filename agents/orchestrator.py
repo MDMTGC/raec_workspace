@@ -237,8 +237,8 @@ NO_TOOL: [reasoning explanation]
                 try:
                     import ast
                     params = ast.literal_eval(params_match.group(1))
-                except:
-                    pass
+                except (ValueError, SyntaxError):
+                    pass  # Failed to parse params, use empty dict
 
             # Execute the tool
             try:

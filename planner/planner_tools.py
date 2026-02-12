@@ -537,8 +537,6 @@ Generate the plan now:
         - $step_prev references get resolved to the previous step's output
         - Keys that suggest data input get last result if value is a placeholder
         """
-        import re
-
         if not params:
             return params
 
@@ -703,59 +701,11 @@ Provide the result of this step.
                 linked_to=[plan_id] if plan_id > 0 else None
             )
             
-            if results['success']:
-                self._consider_skill_extraction(task, results, result_id)
-                
+            # Note: Skill extraction is handled centrally in main.py after verification
+            # to avoid duplicate skill creation
+
         except Exception as e:
             print(f"[!] Failed to store execution results: {e}")
-    
-    def _consider_skill_extraction(self, task: str, results: Dict, result_id: int):
-        """Consider extracting successful execution as a skill"""
-        print(f"[!] Task completed successfully - candidate for skill extraction")
-
-        # Skip if no skills system
-        if not hasattr(self, 'skills') or self.skills is None:
-            return
-
-        # Extract solution pattern from completed steps
-        steps = results.get('steps', [])
-        if not steps:
-            return
-
-        completed_steps = [s for s in steps if s.get('status') == 'completed']
-        if not completed_steps:
-            return
-
-        solution_pattern = "\n".join([
-            f"{s.get('step_id', i+1)}. {s.get('description', 'Unknown')}"
-            + (f" [Tool: {s.get('tool')}]" if s.get('tool') else "")
-            for i, s in enumerate(completed_steps)
-        ])
-
-        # Determine category from task content
-        from skills.skill_graph import SkillCategory
-        task_lower = task.lower()
-        if any(word in task_lower for word in ['parse', 'process', 'transform', 'data', 'filter']):
-            category = SkillCategory.DATA_PROCESSING
-        elif any(word in task_lower for word in ['code', 'write', 'implement', 'function', 'script']):
-            category = SkillCategory.CODE_GENERATION
-        elif any(word in task_lower for word in ['plan', 'break', 'decompose', 'organize']):
-            category = SkillCategory.PLANNING
-        elif any(word in task_lower for word in ['file', 'read', 'write', 'create', 'git', 'push']):
-            category = SkillCategory.TOOL_USAGE
-        else:
-            category = SkillCategory.REASONING
-
-        try:
-            skill_id = self.skills.extract_skill(
-                task_description=task,
-                solution=solution_pattern,
-                execution_result=results,
-                category=category
-            )
-            print(f"   [OK] Skill extracted (ID: {skill_id[:8]}...)")
-        except Exception as e:
-            print(f"   [!] Skill extraction failed: {e}")
 
 
 # Backward compatibility

@@ -1,16 +1,19 @@
 """
-RAEC GUI - Unified Control Interface
-Enhanced with identity, conversation persistence, and intent routing
+RAEC GUI - Presence Interface
+A living, breathing interface for a frontier-class local AI
 """
 import customtkinter as ctk
 import threading
 import traceback
 import sys
 import os
+import math
+import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
+from PIL import Image, ImageDraw, ImageFilter
 
-# Path setup for imports
+# Path setup
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
@@ -21,104 +24,440 @@ except ImportError as e:
     print(f"BOOT ERROR: {e}")
     sys.exit(1)
 
+# Disable default theme - we're going custom
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
 
-class StatsPanel(ctk.CTkFrame):
-    """Panel displaying system statistics"""
+# ═══════════════════════════════════════════════════════════════════════════════
+# COLOR SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class Colors:
+    """RAEC color palette - deep blacks with cyan accent"""
+    # Backgrounds (near-black gradient)
+    BG_DEEP = "#050508"
+    BG_PRIMARY = "#0A0A0F"
+    BG_ELEVATED = "#0F0F16"
+    BG_SURFACE = "#14141D"
+
+    # Accent (cyan/teal - the RAEC signature)
+    ACCENT = "#00D4AA"
+    ACCENT_DIM = "#00A080"
+    ACCENT_GLOW = "#00FFD0"
+    ACCENT_SUBTLE = "#004D40"
+
+    # Text
+    TEXT_PRIMARY = "#E8E8EC"
+    TEXT_SECONDARY = "#8888A0"
+    TEXT_MUTED = "#505068"
+    TEXT_DIM = "#303040"
+
+    # States
+    PROCESSING = "#FFB020"
+    SUCCESS = "#00D060"
+    ERROR = "#FF4060"
+
+    # Borders
+    BORDER_SUBTLE = "#1A1A24"
+    BORDER_ACTIVE = "#252535"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BREATHING ORB - The living presence indicator
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class BreathingOrb(ctk.CTkCanvas):
+    """
+    An ambient orb that breathes when idle, pulses when thinking.
+    The visual soul of RAEC.
+    """
+
+    def __init__(self, parent, size=60):
+        super().__init__(
+            parent,
+            width=size,
+            height=size,
+            bg=Colors.BG_PRIMARY,
+            highlightthickness=0
+        )
+
+        self.size = size
+        self.center = size // 2
+        self.base_radius = size // 4
+
+        # Animation state
+        self.phase = 0.0
+        self.state = "idle"  # idle, thinking, success, error
+        self.intensity = 0.3
+        self.target_intensity = 0.3
+
+        # Start animation
+        self._animate()
+
+    def set_state(self, state: str):
+        """Change orb state: idle, thinking, success, error"""
+        self.state = state
+        if state == "idle":
+            self.target_intensity = 0.3
+        elif state == "thinking":
+            self.target_intensity = 0.8
+        elif state == "success":
+            self.target_intensity = 0.6
+        elif state == "error":
+            self.target_intensity = 0.7
+
+    def _get_color(self) -> str:
+        """Get current color based on state"""
+        if self.state == "thinking":
+            return Colors.PROCESSING
+        elif self.state == "success":
+            return Colors.SUCCESS
+        elif self.state == "error":
+            return Colors.ERROR
+        return Colors.ACCENT
+
+    def _animate(self):
+        """Render one frame of the breathing animation"""
+        self.delete("all")
+
+        # Smooth intensity transition
+        self.intensity += (self.target_intensity - self.intensity) * 0.1
+
+        # Calculate breath cycle
+        if self.state == "thinking":
+            # Faster pulse when thinking
+            breath = math.sin(self.phase * 3) * 0.5 + 0.5
+            self.phase += 0.15
+        else:
+            # Slow, calm breathing when idle
+            breath = math.sin(self.phase) * 0.5 + 0.5
+            self.phase += 0.03
+
+        color = self._get_color()
+
+        # Draw outer glow layers (creates soft halo effect)
+        for i in range(5, 0, -1):
+            glow_radius = self.base_radius + (i * 4) + (breath * 6)
+            alpha = int(self.intensity * 40 * (1 - i/6))
+            glow_color = self._blend_color(Colors.BG_PRIMARY, color, alpha/255)
+
+            self.create_oval(
+                self.center - glow_radius,
+                self.center - glow_radius,
+                self.center + glow_radius,
+                self.center + glow_radius,
+                fill=glow_color,
+                outline=""
+            )
+
+        # Draw core
+        core_radius = self.base_radius + (breath * 3)
+        core_alpha = int(self.intensity * 200 + 55)
+        core_color = self._blend_color(Colors.BG_ELEVATED, color, core_alpha/255)
+
+        self.create_oval(
+            self.center - core_radius,
+            self.center - core_radius,
+            self.center + core_radius,
+            self.center + core_radius,
+            fill=core_color,
+            outline=""
+        )
+
+        # Inner bright spot
+        inner_radius = core_radius * 0.4
+        self.create_oval(
+            self.center - inner_radius,
+            self.center - inner_radius,
+            self.center + inner_radius,
+            self.center + inner_radius,
+            fill=color,
+            outline=""
+        )
+
+        # Schedule next frame
+        self.after(33, self._animate)  # ~30 FPS
+
+    def _blend_color(self, base: str, overlay: str, alpha: float) -> str:
+        """Blend two hex colors"""
+        def hex_to_rgb(h):
+            h = h.lstrip('#')
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+        def rgb_to_hex(r, g, b):
+            return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+
+        br, bg, bb = hex_to_rgb(base)
+        or_, og, ob = hex_to_rgb(overlay)
+
+        nr = br + (or_ - br) * alpha
+        ng = bg + (og - bg) * alpha
+        nb = bb + (ob - bb) * alpha
+
+        return rgb_to_hex(nr, ng, nb)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MESSAGE DISPLAY - Clean, conversational message rendering
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class MessageBubble(ctk.CTkFrame):
+    """A single message in the conversation"""
+
+    def __init__(self, parent, role: str, content: str, timestamp: str = None):
+        is_user = role.lower() == "user"
+
+        super().__init__(
+            parent,
+            fg_color=Colors.BG_SURFACE if is_user else "transparent",
+            corner_radius=12
+        )
+
+        # Role indicator
+        role_text = "You" if is_user else "RAEC"
+        role_color = Colors.TEXT_SECONDARY if is_user else Colors.ACCENT
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(12, 4))
+
+        role_label = ctk.CTkLabel(
+            header,
+            text=role_text,
+            font=("Segoe UI", 11, "bold"),
+            text_color=role_color
+        )
+        role_label.pack(side="left")
+
+        if timestamp:
+            time_label = ctk.CTkLabel(
+                header,
+                text=timestamp,
+                font=("Segoe UI", 10),
+                text_color=Colors.TEXT_DIM
+            )
+            time_label.pack(side="right")
+
+        # Content
+        content_label = ctk.CTkLabel(
+            self,
+            text=content,
+            font=("Segoe UI", 13),
+            text_color=Colors.TEXT_PRIMARY,
+            wraplength=600,
+            justify="left",
+            anchor="w"
+        )
+        content_label.pack(fill="x", padx=16, pady=(0, 12))
+
+
+class ConversationView(ctk.CTkScrollableFrame):
+    """The main conversation display area"""
 
     def __init__(self, parent):
-        super().__init__(parent, fg_color="#111111", corner_radius=8)
-
-        self.title = ctk.CTkLabel(
-            self, text="SYSTEM STATS",
-            font=("JetBrains Mono", 11, "bold"),
-            text_color="#666666"
+        super().__init__(
+            parent,
+            fg_color=Colors.BG_PRIMARY,
+            corner_radius=0,
+            scrollbar_button_color=Colors.BG_ELEVATED,
+            scrollbar_button_hover_color=Colors.BORDER_ACTIVE
         )
-        self.title.pack(pady=(10, 5))
 
-        # Stats labels
-        self.stats_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.stats_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.messages = []
 
-        self.stat_labels = {}
-        stats = [
-            ("session", "Session", "-"),
-            ("trust", "Trust", "new"),
-            ("interactions", "Interactions", "0"),
-            ("memory", "Memory", "0"),
-            ("skills", "Skills", "0"),
-            ("tools", "Tools", "0"),
-        ]
+        # Welcome message
+        self._add_system_message("RAEC is waking up...")
 
-        for key, label, default in stats:
-            frame = ctk.CTkFrame(self.stats_frame, fg_color="transparent")
-            frame.pack(fill="x", pady=2)
+    def add_message(self, role: str, content: str):
+        """Add a message to the conversation"""
+        timestamp = datetime.now().strftime("%H:%M")
 
-            name_label = ctk.CTkLabel(
-                frame, text=f"{label}:",
-                font=("JetBrains Mono", 10),
-                text_color="#555555",
-                width=80, anchor="w"
-            )
-            name_label.pack(side="left")
+        bubble = MessageBubble(self, role, content, timestamp)
+        bubble.pack(fill="x", padx=20, pady=6)
 
-            value_label = ctk.CTkLabel(
-                frame, text=default,
-                font=("JetBrains Mono", 10, "bold"),
-                text_color="#888888"
-            )
-            value_label.pack(side="right")
+        self.messages.append(bubble)
 
-            self.stat_labels[key] = value_label
+        # Scroll to bottom
+        self.after(50, lambda: self._parent_canvas.yview_moveto(1.0))
 
-    def update_stats(self, stats: dict):
-        """Update stats display from analyze_performance() output"""
-        try:
-            if 'memory' in stats:
-                mem = stats['memory']
-                total = sum(mem.values())
-                self.stat_labels['memory'].configure(text=str(total))
+    def _add_system_message(self, text: str):
+        """Add a system status message"""
+        label = ctk.CTkLabel(
+            self,
+            text=text,
+            font=("Cascadia Mono", 11),
+            text_color=Colors.TEXT_MUTED
+        )
+        label.pack(pady=20)
 
-            if 'skills' in stats:
-                self.stat_labels['skills'].configure(
-                    text=str(stats['skills'].get('total_skills', 0))
-                )
+    def update_system_message(self, text: str):
+        """Update the initial system message"""
+        for widget in self.winfo_children():
+            if isinstance(widget, ctk.CTkLabel):
+                widget.configure(text=text)
+                break
 
-            if 'tools' in stats:
-                self.stat_labels['tools'].configure(
-                    text=str(stats['tools'].get('total_tools', 0))
-                )
-        except Exception as e:
-            print(f"Stats update error: {e}")
+    def clear(self):
+        """Clear all messages"""
+        for widget in self.winfo_children():
+            widget.destroy()
+        self.messages = []
 
-    def update_identity(self, core):
-        """Update identity/conversation stats from core"""
-        try:
-            if hasattr(core, 'conversation') and core.conversation.current_session:
-                session_id = core.conversation.current_session.session_id
-                self.stat_labels['session'].configure(text=session_id[:8])
 
-            if hasattr(core, 'identity'):
-                trust = core.identity.identity.trust_level
-                interactions = core.identity.identity.interactions_count
-                self.stat_labels['trust'].configure(text=trust)
-                self.stat_labels['interactions'].configure(text=str(interactions))
-        except Exception as e:
-            print(f"Identity update error: {e}")
+# ═══════════════════════════════════════════════════════════════════════════════
+# INPUT BAR - The command interface
+# ═══════════════════════════════════════════════════════════════════════════════
 
+class InputBar(ctk.CTkFrame):
+    """The input area with integrated controls"""
+
+    def __init__(self, parent, on_submit):
+        super().__init__(parent, fg_color=Colors.BG_ELEVATED, corner_radius=16)
+
+        self.on_submit = on_submit
+
+        # Mode indicator (subtle)
+        self.mode_var = ctk.StringVar(value="auto")
+        self.mode_btn = ctk.CTkButton(
+            self,
+            textvariable=self.mode_var,
+            width=60,
+            height=32,
+            fg_color="transparent",
+            hover_color=Colors.BG_SURFACE,
+            text_color=Colors.TEXT_MUTED,
+            font=("Cascadia Mono", 10),
+            command=self._cycle_mode
+        )
+        self.mode_btn.pack(side="left", padx=(12, 0), pady=10)
+
+        # Main input
+        self.entry = ctk.CTkEntry(
+            self,
+            placeholder_text="Say something...",
+            font=("Segoe UI", 14),
+            height=44,
+            fg_color="transparent",
+            border_width=0,
+            text_color=Colors.TEXT_PRIMARY,
+            placeholder_text_color=Colors.TEXT_MUTED
+        )
+        self.entry.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+        self.entry.bind("<Return>", lambda e: self._submit())
+
+        # Submit hint
+        self.submit_hint = ctk.CTkLabel(
+            self,
+            text="⏎",
+            font=("Segoe UI", 16),
+            text_color=Colors.TEXT_DIM
+        )
+        self.submit_hint.pack(side="right", padx=16)
+
+    def _cycle_mode(self):
+        """Cycle through modes"""
+        modes = ["auto", "standard", "collab", "step"]
+        current = self.mode_var.get()
+        idx = modes.index(current) if current in modes else 0
+        self.mode_var.set(modes[(idx + 1) % len(modes)])
+
+    def _submit(self):
+        """Handle submission"""
+        text = self.entry.get().strip()
+        if text:
+            self.entry.delete(0, "end")
+            mode = self.mode_var.get()
+            # Map short names to full names
+            mode_map = {"collab": "collaborative", "step": "incremental"}
+            self.on_submit(text, mode_map.get(mode, mode))
+
+    def set_enabled(self, enabled: bool):
+        """Enable/disable input"""
+        state = "normal" if enabled else "disabled"
+        self.entry.configure(state=state)
+        self.entry.configure(
+            placeholder_text="Say something..." if enabled else "Thinking..."
+        )
+
+    def focus(self):
+        """Focus the input"""
+        self.entry.focus()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATUS BAR - Minimal, informative
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class StatusBar(ctk.CTkFrame):
+    """Minimal status bar at the bottom"""
+
+    def __init__(self, parent):
+        super().__init__(parent, fg_color=Colors.BG_DEEP, height=28, corner_radius=0)
+        self.pack_propagate(False)
+
+        # Left: Status
+        self.status = ctk.CTkLabel(
+            self,
+            text="Initializing...",
+            font=("Cascadia Mono", 10),
+            text_color=Colors.TEXT_MUTED
+        )
+        self.status.pack(side="left", padx=16)
+
+        # Right: Session info
+        self.session_info = ctk.CTkLabel(
+            self,
+            text="",
+            font=("Cascadia Mono", 10),
+            text_color=Colors.TEXT_DIM
+        )
+        self.session_info.pack(side="right", padx=16)
+
+        # Intent (center-ish)
+        self.intent = ctk.CTkLabel(
+            self,
+            text="",
+            font=("Cascadia Mono", 10),
+            text_color=Colors.ACCENT_DIM
+        )
+        self.intent.pack(side="right", padx=16)
+
+    def set_status(self, text: str, color: str = None):
+        """Update status text"""
+        self.status.configure(
+            text=text,
+            text_color=color or Colors.TEXT_MUTED
+        )
+
+    def set_intent(self, intent: str, confidence: float):
+        """Show detected intent"""
+        self.intent.configure(text=f"{intent} ({confidence:.0%})")
+
+    def set_session(self, session_id: str, interactions: int):
+        """Update session info"""
+        self.session_info.configure(text=f"#{session_id[:6]} · {interactions} msgs")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN APPLICATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class RaecGUI(ctk.CTk):
-    """Main RAEC GUI Application"""
+    """
+    RAEC Presence Interface
+
+    A minimal, living interface that prioritizes conversation
+    while maintaining awareness of system state.
+    """
 
     def __init__(self):
         super().__init__()
 
-        self.title("RAEC | Autonomous Reasoning & Execution Core")
-        self.geometry("1200x800")
-        self.minsize(900, 600)
-        self.configure(fg_color="#0A0A0A")
+        # Window setup
+        self.title("RAEC")
+        self.geometry("900x700")
+        self.minsize(700, 500)
+        self.configure(fg_color=Colors.BG_PRIMARY)
 
         # State
         self.core: Optional[Raec] = None
@@ -126,332 +465,208 @@ class RaecGUI(ctk.CTk):
         self.command_history = []
         self.history_index = -1
 
+        # Build UI
         self._setup_ui()
         self._bind_events()
 
-        # Start core initialization
-        self.update_log("SYSTEM >> Booting sequence initiated...")
+        # Initialize core
         threading.Thread(target=self._init_core, daemon=True).start()
 
     def _setup_ui(self):
-        """Setup the UI layout"""
-        # Configure grid
+        """Build the interface"""
+        # Main container
         self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=0)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        # Main content area (left)
-        self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.main_frame.grid(row=0, column=0, sticky="nsew", padx=(20, 10), pady=20)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(0, weight=1)
+        # ─── Header ───────────────────────────────────────────────────────────
+        header = ctk.CTkFrame(self, fg_color="transparent", height=80)
+        header.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 0))
+        header.grid_propagate(False)
 
-        # Output display
-        self.display = ctk.CTkTextbox(
-            self.main_frame,
-            fg_color="#0D0D0D",
-            text_color="#B0B0B0",
-            font=("JetBrains Mono", 12),
-            corner_radius=8,
-            border_width=1,
-            border_color="#1A1A1A"
+        # Breathing orb
+        self.orb = BreathingOrb(header, size=50)
+        self.orb.pack(side="left", padx=(0, 16))
+
+        # Title
+        title_frame = ctk.CTkFrame(header, fg_color="transparent")
+        title_frame.pack(side="left", fill="y")
+
+        title = ctk.CTkLabel(
+            title_frame,
+            text="RAEC",
+            font=("Segoe UI", 24, "bold"),
+            text_color=Colors.TEXT_PRIMARY
         )
-        self.display.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        title.pack(anchor="w")
 
-        # Input area
-        self.input_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.input_frame.grid(row=1, column=0, sticky="ew")
-        self.input_frame.grid_columnconfigure(1, weight=1)
-
-        # Mode selector
-        self.mode_var = ctk.StringVar(value="auto")
-        self.mode_menu = ctk.CTkOptionMenu(
-            self.input_frame,
-            values=["auto", "standard", "collaborative", "incremental"],
-            variable=self.mode_var,
-            width=130,
-            height=40,
-            fg_color="#1A1A1A",
-            button_color="#252525",
-            button_hover_color="#303030",
-            dropdown_fg_color="#1A1A1A",
-            font=("JetBrains Mono", 11)
+        self.subtitle = ctk.CTkLabel(
+            title_frame,
+            text="Waking up...",
+            font=("Segoe UI", 12),
+            text_color=Colors.TEXT_MUTED
         )
-        self.mode_menu.grid(row=0, column=0, padx=(0, 10))
+        self.subtitle.pack(anchor="w")
 
-        # Input entry
-        self.entry = ctk.CTkEntry(
-            self.input_frame,
-            placeholder_text="Initializing...",
-            height=40,
-            state="disabled",
-            font=("JetBrains Mono", 12),
-            fg_color="#0D0D0D",
-            border_color="#1A1A1A"
-        )
-        self.entry.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        # ─── Conversation ─────────────────────────────────────────────────────
+        self.conversation = ConversationView(self)
+        self.conversation.grid(row=1, column=0, sticky="nsew", padx=30, pady=20)
 
-        # Execute button
-        self.exec_btn = ctk.CTkButton(
-            self.input_frame,
-            text="EXECUTE",
-            command=self._submit,
-            state="disabled",
-            width=100,
-            height=40,
-            fg_color="#1A1A1A",
-            hover_color="#252525",
-            font=("JetBrains Mono", 11, "bold")
-        )
-        self.exec_btn.grid(row=0, column=2)
+        # ─── Input ────────────────────────────────────────────────────────────
+        self.input_bar = InputBar(self, self._on_submit)
+        self.input_bar.grid(row=2, column=0, sticky="ew", padx=30, pady=(0, 20))
 
-        # Right sidebar
-        self.sidebar = ctk.CTkFrame(self, fg_color="#0D0D0D", width=200, corner_radius=8)
-        self.sidebar.grid(row=0, column=1, sticky="ns", padx=(0, 20), pady=20)
-        self.sidebar.grid_propagate(False)
-
-        # Stats panel
-        self.stats_panel = StatsPanel(self.sidebar)
-        self.stats_panel.pack(fill="x", padx=10, pady=10)
-
-        # Action buttons
-        self.btn_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.btn_frame.pack(fill="x", padx=10, pady=10)
-
-        self.refresh_btn = ctk.CTkButton(
-            self.btn_frame,
-            text="Refresh Stats",
-            command=self._refresh_stats,
-            state="disabled",
-            fg_color="#1A1A1A",
-            hover_color="#252525",
-            font=("JetBrains Mono", 10)
-        )
-        self.refresh_btn.pack(fill="x", pady=2)
-
-        self.clear_btn = ctk.CTkButton(
-            self.btn_frame,
-            text="Clear Log",
-            command=self._clear_log,
-            fg_color="#1A1A1A",
-            hover_color="#252525",
-            font=("JetBrains Mono", 10)
-        )
-        self.clear_btn.pack(fill="x", pady=2)
-
-        # Status bar
-        self.status_frame = ctk.CTkFrame(self, fg_color="#111111", height=30, corner_radius=0)
-        self.status_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
-
-        self.status_label = ctk.CTkLabel(
-            self.status_frame,
-            text="Initializing Core...",
-            font=("JetBrains Mono", 10),
-            text_color="#555555"
-        )
-        self.status_label.pack(side="left", padx=20, pady=5)
-
-        self.mode_label = ctk.CTkLabel(
-            self.status_frame,
-            text="Mode: auto",
-            font=("JetBrains Mono", 10),
-            text_color="#444444"
-        )
-        self.mode_label.pack(side="right", padx=20, pady=5)
-
-        self.intent_label = ctk.CTkLabel(
-            self.status_frame,
-            text="",
-            font=("JetBrains Mono", 10),
-            text_color="#666666"
-        )
-        self.intent_label.pack(side="right", padx=10, pady=5)
+        # ─── Status ───────────────────────────────────────────────────────────
+        self.status_bar = StatusBar(self)
+        self.status_bar.grid(row=3, column=0, sticky="ew")
 
     def _bind_events(self):
-        """Bind keyboard and window events"""
-        self.entry.bind("<Return>", lambda e: self._submit())
-        self.entry.bind("<Up>", self._history_prev)
-        self.entry.bind("<Down>", self._history_next)
-        self.mode_var.trace_add("write", self._on_mode_change)
+        """Setup event bindings"""
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _on_mode_change(self, *args):
-        """Update mode label when mode changes"""
-        mode = self.mode_var.get()
-        self.mode_label.configure(text=f"Mode: {mode}")
+        # Keyboard shortcuts
+        self.bind("<Control-l>", lambda e: self.conversation.clear())
+        self.bind("<Escape>", lambda e: self.input_bar.focus())
 
-    def _history_prev(self, event):
-        """Navigate to previous command in history"""
-        if self.command_history and self.history_index < len(self.command_history) - 1:
-            self.history_index += 1
-            self.entry.delete(0, "end")
-            self.entry.insert(0, self.command_history[-(self.history_index + 1)])
-
-    def _history_next(self, event):
-        """Navigate to next command in history"""
-        if self.history_index > 0:
-            self.history_index -= 1
-            self.entry.delete(0, "end")
-            self.entry.insert(0, self.command_history[-(self.history_index + 1)])
-        elif self.history_index == 0:
-            self.history_index = -1
-            self.entry.delete(0, "end")
-
-    def update_log(self, message: str, tag: str = "normal"):
-        """Add timestamped message to the log"""
-        try:
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self.display.insert("end", f"[{timestamp}] {message}\n")
-            self.display.see("end")
-        except Exception as e:
-            print(f"Log error: {e}")
-
-    def _set_status(self, text: str, color: str = "#555555"):
-        """Update status bar"""
-        try:
-            self.status_label.configure(text=text, text_color=color)
-        except:
-            pass
-
-    def _set_executing(self, executing: bool):
-        """Update UI state during execution"""
-        self.is_executing = executing
-        state = "disabled" if executing else "normal"
-
-        try:
-            self.entry.configure(state=state)
-            self.exec_btn.configure(
-                state=state,
-                text="..." if executing else "EXECUTE"
-            )
-            self.mode_menu.configure(state=state)
-        except:
-            pass
+        # History navigation
+        self.input_bar.entry.bind("<Up>", self._history_prev)
+        self.input_bar.entry.bind("<Down>", self._history_next)
 
     def _init_core(self):
-        """Initialize the Raec core in background"""
+        """Initialize RAEC core"""
         try:
-            self._set_status("Loading core components...", "#888888")
+            self.status_bar.set_status("Loading core...", Colors.PROCESSING)
             self.core = Raec()
 
-            # Enable UI
-            self.after(0, lambda: self.entry.configure(
-                state="normal",
-                placeholder_text="Enter task or command..."
-            ))
-            self.after(0, lambda: self.exec_btn.configure(state="normal"))
-            self.after(0, lambda: self.refresh_btn.configure(state="normal"))
-
-            self._set_status("CORE ONLINE", "#00AA00")
-            self.update_log("SYSTEM >> Core initialized. All subsystems operational.")
-
-            # Initial stats refresh
-            self._refresh_stats()
+            # Update UI
+            self.after(0, self._on_core_ready)
 
         except Exception as e:
-            error_trace = traceback.format_exc()
-            self.update_log(f"CRITICAL >> Core initialization failed: {e}")
-            self._set_status("CORE OFFLINE", "#FF0000")
-            print(f"--- Init Error ---\n{error_trace}")
+            self.after(0, lambda: self._on_core_error(str(e)))
+            traceback.print_exc()
 
-    def _submit(self):
-        """Handle command submission"""
+    def _on_core_ready(self):
+        """Called when core is ready"""
+        self.subtitle.configure(text="Ready")
+        self.orb.set_state("idle")
+        self.status_bar.set_status("Ready", Colors.SUCCESS)
+
+        # Update session info
+        if hasattr(self.core, 'conversation'):
+            session_id = self.core.conversation.current_session.session_id
+            interactions = self.core.identity.identity.interactions_count
+            self.status_bar.set_session(session_id, interactions)
+
+        self.conversation.update_system_message("RAEC is ready. How can I help?")
+        self.input_bar.set_enabled(True)
+        self.input_bar.focus()
+
+    def _on_core_error(self, error: str):
+        """Called when core fails to load"""
+        self.subtitle.configure(text="Offline", text_color=Colors.ERROR)
+        self.orb.set_state("error")
+        self.status_bar.set_status(f"Error: {error}", Colors.ERROR)
+        self.conversation.update_system_message(f"Failed to start: {error}")
+
+    def _on_submit(self, text: str, mode: str):
+        """Handle user input"""
         if self.is_executing or not self.core:
             return
 
-        cmd = self.entry.get().strip()
-        if not cmd:
-            return
-
         # Add to history
-        self.command_history.append(cmd)
+        self.command_history.append(text)
         self.history_index = -1
 
-        # Clear input
-        self.entry.delete(0, "end")
+        # Show user message
+        self.conversation.add_message("user", text)
 
-        # Log command
-        mode = self.mode_var.get()
-        self.update_log(f"USER [{mode}] >> {cmd}")
-
-        # Execute in background
+        # Execute
         threading.Thread(
             target=self._execute,
-            args=(cmd, mode),
+            args=(text, mode),
             daemon=True
         ).start()
 
-    def _execute(self, cmd: str, mode: str):
-        """Execute command in background thread"""
-        self._set_executing(True)
-        self._set_status(f"Processing...", "#FFAA00")
+    def _execute(self, text: str, mode: str):
+        """Execute in background"""
+        self.is_executing = True
+        self.after(0, lambda: self.input_bar.set_enabled(False))
+        self.after(0, lambda: self.orb.set_state("thinking"))
+        self.after(0, lambda: self.status_bar.set_status("Thinking...", Colors.PROCESSING))
 
         try:
-            # Capture intent before execution for display
+            # Get intent for display
             if hasattr(self.core, 'intent_classifier'):
-                classification = self.core.intent_classifier.classify(cmd)
-                intent_str = f"Intent: {classification.intent.value} ({classification.confidence:.0%})"
-                self.after(0, lambda: self.intent_label.configure(text=intent_str))
+                classification = self.core.intent_classifier.classify(text)
+                self.after(0, lambda: self.status_bar.set_intent(
+                    classification.intent.value,
+                    classification.confidence
+                ))
 
-            result = self.core.process_input(cmd, mode=mode)
-            self.update_log(f"RAEC >> {result}")
-            self._set_status("Ready", "#00AA00")
+            # Process
+            result = self.core.process_input(text, mode=mode)
 
-            # Auto-refresh stats after execution
-            self._refresh_stats()
+            # Show response
+            self.after(0, lambda: self.conversation.add_message("assistant", result))
+            self.after(0, lambda: self.orb.set_state("success"))
+            self.after(0, lambda: self.status_bar.set_status("Ready", Colors.SUCCESS))
+
+            # Update session info
+            if hasattr(self.core, 'identity'):
+                interactions = self.core.identity.identity.interactions_count
+                session_id = self.core.conversation.current_session.session_id
+                self.after(0, lambda: self.status_bar.set_session(session_id, interactions))
+
+            # Return to idle after a moment
+            self.after(1500, lambda: self.orb.set_state("idle"))
 
         except Exception as e:
-            error_msg = str(e)
-            self.update_log(f"ERROR >> {error_msg}")
-            self._set_status("Execution failed", "#FF5555")
-            print(f"Execution error: {traceback.format_exc()}")
+            self.after(0, lambda: self.conversation.add_message(
+                "assistant", f"Error: {str(e)}"
+            ))
+            self.after(0, lambda: self.orb.set_state("error"))
+            self.after(0, lambda: self.status_bar.set_status(f"Error", Colors.ERROR))
+            self.after(3000, lambda: self.orb.set_state("idle"))
 
         finally:
-            self._set_executing(False)
+            self.is_executing = False
+            self.after(0, lambda: self.input_bar.set_enabled(True))
+            self.after(0, lambda: self.input_bar.focus())
 
-    def _refresh_stats(self):
-        """Refresh the stats panel"""
-        if not self.core:
-            return
+    def _history_prev(self, event):
+        """Navigate history up"""
+        if self.command_history and self.history_index < len(self.command_history) - 1:
+            self.history_index += 1
+            self.input_bar.entry.delete(0, "end")
+            self.input_bar.entry.insert(0, self.command_history[-(self.history_index + 1)])
 
-        try:
-            # Capture stdout to prevent console spam
-            import io
-            from contextlib import redirect_stdout
-
-            f = io.StringIO()
-            with redirect_stdout(f):
-                stats = self.core.analyze_performance()
-
-            self.stats_panel.update_stats(stats)
-            self.stats_panel.update_identity(self.core)
-        except Exception as e:
-            print(f"Stats refresh error: {e}")
-
-    def _clear_log(self):
-        """Clear the output log"""
-        try:
-            self.display.delete("1.0", "end")
-            self.update_log("SYSTEM >> Log cleared")
-        except:
-            pass
+    def _history_next(self, event):
+        """Navigate history down"""
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.input_bar.entry.delete(0, "end")
+            self.input_bar.entry.insert(0, self.command_history[-(self.history_index + 1)])
+        elif self.history_index == 0:
+            self.history_index = -1
+            self.input_bar.entry.delete(0, "end")
 
     def _on_close(self):
-        """Handle window close - clean shutdown"""
+        """Clean shutdown"""
         try:
             if self.core:
-                self.update_log("SYSTEM >> Shutting down...")
                 self.core.close()
-        except Exception as e:
-            print(f"Shutdown error: {e}")
-        finally:
-            self.destroy()
+        except:
+            pass
+        self.destroy()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     try:
         app = RaecGUI()
         app.mainloop()
     except Exception as e:
-        print(f"GUI CRASH: {e}")
+        print(f"FATAL: {e}")
         traceback.print_exc()

@@ -106,7 +106,8 @@ class ToolExecutor:
         """
         Return a plain-text description of all available tools,
         suitable for inclusion in an LLM prompt.
-        Includes parameter signatures for accurate tool usage.
+        Includes parameter signatures with types, defaults,
+        required/optional markers, and return types for accurate tool usage.
         """
         import inspect
 
@@ -120,23 +121,44 @@ class ToolExecutor:
                 lines.append(f"  [{cat.upper()}]")
 
             fn = self.interface.tools[key]
-            doc = (fn.__doc__ or "").strip().split('\n')[0]  # First line only
+            doc = (fn.__doc__ or "").strip().split('\n')[0]
 
-            # Get parameter signature
+            # Build detailed parameter info
             try:
                 sig = inspect.signature(fn)
-                params = []
+                param_parts = []
                 for pname, param in sig.parameters.items():
+                    if pname.startswith('_'):
+                        continue
+                    if param.kind == inspect.Parameter.VAR_KEYWORD:
+                        continue
+                    if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                        continue
+                    ptype = ""
                     if param.annotation != inspect.Parameter.empty:
                         ptype = param.annotation.__name__ if hasattr(param.annotation, '__name__') else str(param.annotation)
-                        params.append(f"{pname}: {ptype}")
+
+                    if param.default != inspect.Parameter.empty:
+                        default_repr = repr(param.default)
+                        param_parts.append(f"{pname}: {ptype}={default_repr}" if ptype else f"{pname}={default_repr}")
                     else:
-                        params.append(pname)
-                param_str = f"({', '.join(params)})" if params else "()"
+                        marker = " [REQUIRED]" if ptype else ""
+                        param_parts.append(f"{pname}: {ptype}{marker}" if ptype else f"{pname}{marker}")
+
+                param_str = f"({', '.join(param_parts)})" if param_parts else "()"
+
+                # Get return type
+                ret = sig.return_annotation
+                if ret != inspect.Parameter.empty and ret is not None:
+                    ret_name = ret.__name__ if hasattr(ret, '__name__') else str(ret)
+                    ret_str = f" -> {ret_name}"
+                else:
+                    ret_str = ""
             except (ValueError, TypeError):
                 param_str = "()"
+                ret_str = ""
 
-            lines.append(f"    {key}{param_str}: {doc or '(no description)'}")
+            lines.append(f"    {key}{param_str}{ret_str}: {doc or '(no description)'}")
 
         lines.append("")
         return "\n".join(lines)

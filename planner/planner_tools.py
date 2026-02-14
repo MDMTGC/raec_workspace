@@ -5,6 +5,7 @@ Plans and executes tasks using actual tools
 import json
 import time
 import re
+import inspect
 from typing import List, Dict, Optional, Any
 from enum import Enum
 
@@ -74,40 +75,74 @@ class ToolEnabledPlanner:
     
     def run(self, task: str, context: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        Execute a task with planning and tool usage
+        Execute a task with planning and tool usage.
+        Includes adaptive re-planning: if execution fails badly,
+        the planner generates a recovery plan using error context.
         """
         print(f"\n{'='*70}")
         print(f"[o] TASK: {task}")
         print(f"{'='*70}\n")
-        
+
+        max_replan_attempts = self.max_steps // 5 or 1  # Scale with plan complexity
+        max_replan_attempts = min(max_replan_attempts, 2)  # Cap at 2 replans
+
         # Check for similar past tasks in memory
         similar_experiences = self._retrieve_similar_tasks(task)
-        
-        # Generate plan with tool assignment
-        plan_steps = self._generate_plan_with_tools(task, similar_experiences, context)
-        
-        # Store plan in memory
-        plan_memory_id = self._store_plan(task, plan_steps)
-        
-        # Execute plan using tools
-        results = self._execute_plan_with_tools(plan_steps, task, context)
-        
+
+        all_errors = []
+
+        for attempt in range(1 + max_replan_attempts):
+            if attempt == 0:
+                # First attempt: normal planning
+                plan_steps = self._generate_plan_with_tools(task, similar_experiences, context)
+            else:
+                # Re-plan attempt: feed errors back to the planner
+                print(f"\n{'='*70}")
+                print(f"[~] ADAPTIVE RE-PLAN (attempt {attempt}/{max_replan_attempts})")
+                print(f"{'='*70}\n")
+                plan_steps = self._generate_recovery_plan(
+                    task, all_errors, similar_experiences, context
+                )
+
+            # Store plan in memory
+            plan_memory_id = self._store_plan(task, plan_steps)
+
+            # Execute plan using tools
+            results = self._execute_plan_with_tools(plan_steps, task, context)
+
+            # Check if execution succeeded or is good enough
+            steps = results.get('steps', [])
+            total = len(steps)
+            completed = sum(1 for s in steps if s.get('status') == 'completed')
+            completion_rate = completed / total if total else 0.0
+
+            if results.get('success') or completion_rate >= 0.8:
+                # Good enough — stop re-planning
+                break
+
+            # Collect errors for the next re-plan attempt
+            all_errors.extend(results.get('errors', []))
+
+            if attempt < max_replan_attempts:
+                print(f"\n   [!] Completion rate: {completion_rate:.0%} — triggering re-plan")
+
         # Store execution results
         self._store_execution_results(task, results, plan_memory_id)
-        
+
         return {
             'task': task,
             'plan_id': plan_memory_id,
             'steps': [self._step_to_dict(s) for s in plan_steps],
             'results': results,
-            'success': results.get('success', False)
+            'success': results.get('success', False),
+            'replan_attempts': attempt
         }
     
     def _retrieve_similar_tasks(self, task: str) -> List[Dict]:
-        """Query memory for similar past tasks"""
+        """Query memory for similar past tasks and relevant beliefs."""
         try:
             from memory.memory_db import MemoryType
-            
+
             print("[?] Searching memory for similar past tasks...")
             similar = self.memory.query(
                 query_text=task,
@@ -115,12 +150,24 @@ class ToolEnabledPlanner:
                 k=3,
                 min_confidence=0.7
             )
-            
+
             if similar:
-                print(f"   [OK] Found {len(similar)} relevant past experiences\n")
+                print(f"   [OK] Found {len(similar)} relevant past experiences")
             else:
-                print("   • No similar past experiences found\n")
-            
+                print("   • No similar past experiences found")
+
+            # W11: Also retrieve relevant beliefs (lessons from past failures)
+            beliefs = self.memory.query(
+                query_text=task,
+                memory_types=[MemoryType.BELIEF],
+                k=3,
+                min_confidence=0.4
+            )
+            if beliefs:
+                print(f"   [OK] Found {len(beliefs)} relevant beliefs/lessons")
+                similar.extend(beliefs)
+
+            print()
             return similar
         except Exception as e:
             print(f"   [!] Memory query failed: {e}\n")
@@ -165,6 +212,69 @@ class ToolEnabledPlanner:
             # Fallback to simple single-step plan
             return [PlanStep(1, f"Complete task: {task}")]
     
+    def _generate_recovery_plan(
+        self,
+        task: str,
+        errors: List[Dict],
+        similar_experiences: List[Dict],
+        context: Optional[Dict]
+    ) -> List[PlanStep]:
+        """
+        Generate a recovery plan after a failed execution attempt.
+        Feeds the error summary back to the LLM so it can avoid the same mistakes.
+        """
+        print("[=] Generating recovery plan from error context...\n")
+
+        tools_doc = self.tools.get_tools_for_llm()
+
+        # Build error summary
+        error_lines = []
+        for err in errors[-5:]:  # Last 5 errors max
+            error_lines.append(
+                f"- Step {err.get('step_id', '?')}: {str(err.get('error', 'unknown'))[:200]}"
+            )
+        error_summary = "\n".join(error_lines) if error_lines else "Unknown failures"
+
+        # Build full recovery prompt using the standard prompt builder + error preamble
+        base_prompt = self._build_planning_prompt_with_tools(
+            task, similar_experiences, context, tools_doc
+        )
+
+        recovery_preamble = f"""**RECOVERY MODE:** The previous plan for this task FAILED.
+
+**Errors from previous attempt:**
+{error_summary}
+
+**You MUST use a different approach.** Do NOT repeat the same failing tool calls.
+If a URL returned an error, try a different URL or data source.
+If a tool failed with bad parameters, use different parameters or a different tool.
+Prefer composite tools (web.fetch_text, web.fetch_json) over raw http_get.
+
+"""
+        prompt = recovery_preamble + base_prompt
+
+        try:
+            from raec_core.model_swarm import TaskType
+            plan_text = self.llm.generate(
+                prompt, temperature=0.6, max_tokens=2048,
+                task_type=TaskType.ERROR_RECOVERY
+            )
+
+            steps = self._parse_plan_with_tools(plan_text)
+
+            print(f"[OK] Recovery plan with {len(steps)} steps:\n")
+            for step in steps:
+                tool_info = f" [{step.tool_category}.{step.tool_name}]" if step.tool_category else ""
+                deps = f" (depends on: {step.dependencies})" if step.dependencies else ""
+                print(f"   {step.step_id}. {step.description}{tool_info}{deps}")
+            print()
+
+            return steps
+
+        except Exception as e:
+            print(f"[!] Recovery plan generation failed: {e}")
+            return [PlanStep(1, f"Complete task using reasoning: {task}")]
+
     def _build_planning_prompt_with_tools(
         self,
         task: str,
@@ -190,9 +300,13 @@ class ToolEnabledPlanner:
 
         prompt_parts.append('''
 \n**CRITICAL INSTRUCTIONS:**
-1. ONLY use tools from the list above. Do NOT invent tools that don't exist.
+1. ONLY use tools from the list above. Do NOT invent tools or parameters that don't exist.
 2. Every step with a tool MUST have PARAMS with ALL required arguments.
-3. Use $stepN to reference output from step N (e.g., $step1, $step2).
+3. ONLY use parameter names shown in the tool signatures. Do NOT add extra parameters.
+4. Use $stepN to reference output from step N (e.g., $step1, $step2).
+5. Pay attention to return types (shown as -> type). Ensure the output type of one step matches the expected input type of the next step. For example, web.fetch_text returns str, so pass it to tools expecting str, not list.
+6. data.parse_json only works on JSON strings, NOT on HTML. Use web.fetch_json for JSON APIs.
+7. For web pages, ALWAYS use web.fetch_text (returns clean text) instead of web.http_get (returns raw HTML).
 
 **Required Format - Follow EXACTLY:**
 1. [Description of step]
@@ -213,27 +327,31 @@ class ToolEnabledPlanner:
 - Analyze code: TOOL: code.validate_python, PARAMS: {"code": "$step2"}
 - Run code: TOOL: code.run_python, PARAMS: {"code": "print('hello')"}
 - Run shell/git: TOOL: code.run_shell, PARAMS: {"command": "git add file.txt", "cwd": "/path/to/repo"}
-- Git commit: TOOL: code.run_shell, PARAMS: {"command": "git commit -m 'message'", "cwd": "/path/to/repo"}
-- Git push: TOOL: code.run_shell, PARAMS: {"command": "git push origin main", "cwd": "/path/to/repo"}
 - Change directory: TOOL: system.change_dir, PARAMS: {"path": "/path/to/directory"}
 - Count items: TOOL: data.count, PARAMS: {"data": "$step1"}
 - Filter list: TOOL: data.filter_list, PARAMS: {"data": "$step1", "condition": ".py"}
+
+**For web content retrieval (PREFERRED - single-step composite tools):**
+- Fetch readable text from a web page: TOOL: web.fetch_text, PARAMS: {"url": "https://example.com"}
+- Fetch JSON from an API endpoint: TOOL: web.fetch_json, PARAMS: {"url": "https://api.example.com/data"}
+- Fetch all links from a page: TOOL: web.fetch_links, PARAMS: {"url": "https://example.com"}
+
+These composite tools handle fetching + parsing in one step. ALWAYS prefer these over raw http_get.
+
+Example for web research:
+1. Fetch readable text from web page
+   TOOL: web.fetch_text
+   PARAMS: {"url": "https://example.com/article"}
+2. Search for relevant content [DEPENDS: 1]
+   TOOL: text.search_text
+   PARAMS: {"text": "$step1", "pattern": "keyword"}
+
+**Only use web.http_get if you need raw HTML** (e.g., to extract_links or parse specific HTML elements).
 
 **For desktop/directory file operations:**
 1. Use system.get_desktop_path to get the directory path
 2. Use system.join_path to combine directory + filename
 3. Use file.write_file with the full path from step 2
-
-Example for creating Desktop/Test.txt:
-1. Get desktop path
-   TOOL: system.get_desktop_path
-   PARAMS: {}
-2. Construct full filepath [DEPENDS: 1]
-   TOOL: system.join_path
-   PARAMS: {"base": "$step1", "parts": "Test.txt"}
-3. Write file [DEPENDS: 2]
-   TOOL: file.write_file
-   PARAMS: {"filepath": "$step2", "content": "file content here"}
 
 **IMPORTANT:** If you cannot accomplish a step with available tools, describe it WITHOUT a TOOL line and the system will use LLM reasoning instead.
 
@@ -338,28 +456,77 @@ Generate the plan now:
 
     def _validate_and_repair_steps(self, steps: List[PlanStep]) -> List[PlanStep]:
         """
-        Validate tools exist and repair missing params where possible.
-        Removes invalid tools so LLM reasoning is used instead.
+        Validate tools exist, check parameter names against actual signatures,
+        strip invalid params, and repair missing required params where possible.
         """
         available_tools = set(self.tools.list_tools().keys())
 
         for step in steps:
-            if step.tool_category and step.tool_name:
-                tool_key = f"{step.tool_category}.{step.tool_name}"
+            if not (step.tool_category and step.tool_name):
+                continue
 
-                # Check if tool exists
-                if tool_key not in available_tools:
-                    print(f"   [!] Tool '{tool_key}' not found - will use LLM reasoning")
-                    step.tool_category = None
-                    step.tool_name = None
-                    step.tool_params = {}
-                    continue
+            tool_key = f"{step.tool_category}.{step.tool_name}"
 
-                # Repair missing params based on tool and description
-                if not step.tool_params:
-                    step.tool_params = self._infer_params(step, tool_key)
+            # Check if tool exists
+            if tool_key not in available_tools:
+                print(f"   [!] Tool '{tool_key}' not found - will use LLM reasoning")
+                step.tool_category = None
+                step.tool_name = None
+                step.tool_params = {}
+                continue
+
+            # Validate parameters against actual signature
+            fn = self.tools.interface.tools.get(tool_key)
+            if fn:
+                step.tool_params = self._validate_params(step, tool_key, fn)
+
+            # Repair missing params based on tool and description
+            if not step.tool_params:
+                step.tool_params = self._infer_params(step, tool_key)
 
         return steps
+
+    def _validate_params(
+        self, step: PlanStep, tool_key: str, fn: callable
+    ) -> Dict[str, Any]:
+        """
+        Validate step params against the tool's actual signature.
+        Strips invalid params, warns about missing required ones.
+        """
+        if not step.tool_params:
+            return step.tool_params
+
+        try:
+            sig = inspect.signature(fn)
+        except (ValueError, TypeError):
+            return step.tool_params
+
+        valid_names = set()
+        required_names = set()
+
+        for pname, param in sig.parameters.items():
+            if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+                continue
+            if pname.startswith('_'):
+                continue
+            valid_names.add(pname)
+            if param.default is inspect.Parameter.empty:
+                required_names.add(pname)
+
+        # Strip invalid params
+        cleaned = {}
+        for key, value in step.tool_params.items():
+            if key in valid_names:
+                cleaned[key] = value
+            else:
+                print(f"   [!] Step {step.step_id}: Stripped invalid param '{key}' from {tool_key}")
+
+        # Warn about missing required params (that aren't $step references yet)
+        for req in required_names:
+            if req not in cleaned:
+                print(f"   [!] Step {step.step_id}: Missing required param '{req}' for {tool_key}")
+
+        return cleaned
 
     def _infer_params(self, step: PlanStep, tool_key: str) -> Dict[str, Any]:
         """
@@ -405,33 +572,62 @@ Generate the plan now:
         task: str,
         context: Optional[Dict]
     ) -> Dict[str, Any]:
-        """Execute plan steps using actual tools"""
+        """Execute plan steps using actual tools, with failure recovery."""
         print("[*]  EXECUTING PLAN WITH TOOLS\n")
         print(f"{'='*70}\n")
-        
+
         completed_steps = set()
         failed_steps = set()
         step_results = {}
-        
+
         results = {
             'success': True,
             'steps': [],
-            'errors': []
+            'errors': [],
+            'recovery_attempts': 0
         }
-        
+
         for step in steps:
-            # Check dependencies
-            if not all(dep in completed_steps for dep in step.dependencies):
+            # Check dependencies — if any dependency failed, try LLM fallback
+            unmet_deps = [dep for dep in step.dependencies if dep not in completed_steps]
+            failed_deps = [dep for dep in unmet_deps if dep in failed_steps]
+
+            if unmet_deps and not failed_deps:
+                # Dependencies just haven't run yet (shouldn't happen with sequential exec)
                 step.status = PlanStatus.BLOCKED
                 results['steps'].append(self._step_to_dict(step))
                 print(f"[||]  Step {step.step_id}: BLOCKED (dependencies not met)")
                 continue
-            
+
+            if failed_deps:
+                # Dependencies failed — try to recover via LLM reasoning
+                print(f"[~]  Step {step.step_id}: Dependencies {failed_deps} failed — attempting LLM fallback")
+                results['recovery_attempts'] += 1
+                try:
+                    step.start_time = time.time()
+                    fallback_result = self._execute_step_with_llm(step, task, step_results, context)
+                    step.result = fallback_result
+                    step.status = PlanStatus.COMPLETED
+                    step.end_time = time.time()
+                    completed_steps.add(step.step_id)
+                    step_results[step.step_id] = step.result
+                    results['steps'].append(self._step_to_dict(step))
+                    print(f"   [OK] Recovered via LLM reasoning")
+                    print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
+                    continue
+                except Exception as e:
+                    step.status = PlanStatus.BLOCKED
+                    step.error = f"Recovery failed: {e}"
+                    step.end_time = time.time()
+                    results['steps'].append(self._step_to_dict(step))
+                    print(f"   [X] Recovery failed: {e}\n")
+                    continue
+
             # Execute step
             print(f"[>]  Step {step.step_id}: {step.description}")
             step.status = PlanStatus.IN_PROGRESS
             step.start_time = time.time()
-            
+
             try:
                 # Execute using tools if specified
                 if step.tool_category and step.tool_name:
@@ -450,31 +646,82 @@ Generate the plan now:
                         **resolved_params
                     )
 
-                    # Check ToolResult.success flag - don't assume success!
+                    # Check ToolResult.success flag
                     if step_result.success:
-                        # Store just the output value, not the full ToolResult
-                        step.result = step_result.output
-                        step.status = PlanStatus.COMPLETED
-                        step.end_time = time.time()
-                        completed_steps.add(step.step_id)
-                        step_results[step.step_id] = step_result.output  # Store output directly
-                        results['steps'].append(self._step_to_dict(step))
-                        print(f"   [OK] Result: {str(step_result.output)[:100]}...")
-                        print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
+                        # Per-step verification: catch subtle failures
+                        warning = self._quick_verify_step_output(
+                            tool_key, step_result.output, step
+                        )
+                        if warning:
+                            print(f"   [!] Step verify warning: {warning}")
+                            # Treat as a soft failure — mark output but flag it
+                            step.result = step_result.output
+                            step.status = PlanStatus.COMPLETED
+                            step.end_time = time.time()
+                            completed_steps.add(step.step_id)
+                            step_results[step.step_id] = step_result.output
+                            results['steps'].append(self._step_to_dict(step))
+                            results.setdefault('warnings', []).append({
+                                'step_id': step.step_id,
+                                'warning': warning
+                            })
+                            print(f"   [OK] Result (with warning): {str(step_result.output)[:100]}...")
+                            print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
+                        else:
+                            step.result = step_result.output
+                            step.status = PlanStatus.COMPLETED
+                            step.end_time = time.time()
+                            completed_steps.add(step.step_id)
+                            step_results[step.step_id] = step_result.output
+                            results['steps'].append(self._step_to_dict(step))
+                            print(f"   [OK] Result: {str(step_result.output)[:100]}...")
+                            print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
                     else:
-                        # Tool execution failed
-                        step.status = PlanStatus.FAILED
-                        step.error = step_result.error or str(step_result.output)
-                        step.result = step_result.output
-                        step.end_time = time.time()
-                        failed_steps.add(step.step_id)
-                        results['success'] = False
-                        results['errors'].append({
-                            'step_id': step.step_id,
-                            'error': step.error
-                        })
-                        results['steps'].append(self._step_to_dict(step))
-                        print(f"   [X] Tool failed: {step.error}\n")
+                        # Tool failed — try param correction retry, then LLM fallback
+                        error_msg = step_result.error or str(step_result.output)
+                        print(f"   [!] Tool failed: {error_msg}")
+                        results['recovery_attempts'] += 1
+
+                        # Stage 1: Try correcting params via LLM and retrying the tool
+                        retry_result = self._retry_with_corrected_params(
+                            step, tool_key, resolved_params, error_msg, task
+                        )
+                        if retry_result is not None:
+                            step.result = retry_result
+                            step.status = PlanStatus.COMPLETED
+                            step.end_time = time.time()
+                            completed_steps.add(step.step_id)
+                            step_results[step.step_id] = step.result
+                            results['steps'].append(self._step_to_dict(step))
+                            print(f"   [OK] Recovered via param correction retry\n")
+                        else:
+                            # Stage 2: Fall back to LLM reasoning
+                            print(f"   [~] Attempting LLM fallback...")
+                            try:
+                                fallback_result = self._execute_step_with_llm(
+                                    step, task, step_results, context,
+                                    error_context=f"Tool {tool_key} failed: {error_msg}"
+                                )
+                                step.result = fallback_result
+                                step.status = PlanStatus.COMPLETED
+                                step.end_time = time.time()
+                                completed_steps.add(step.step_id)
+                                step_results[step.step_id] = step.result
+                                results['steps'].append(self._step_to_dict(step))
+                                print(f"   [OK] Recovered via LLM reasoning\n")
+                            except Exception:
+                                step.status = PlanStatus.FAILED
+                                step.error = error_msg
+                                step.result = step_result.output
+                                step.end_time = time.time()
+                                failed_steps.add(step.step_id)
+                                results['success'] = False
+                                results['errors'].append({
+                                    'step_id': step.step_id,
+                                    'error': error_msg
+                                })
+                                results['steps'].append(self._step_to_dict(step))
+                                print(f"   [X] All recovery failed\n")
                 else:
                     # No tool specified - use LLM to execute
                     print(f"   [R] Using LLM reasoning")
@@ -487,22 +734,22 @@ Generate the plan now:
                     results['steps'].append(self._step_to_dict(step))
                     print(f"   [OK] Completed")
                     print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
-                
+
             except Exception as e:
                 step.status = PlanStatus.FAILED
                 step.error = str(e)
                 step.end_time = time.time()
-                
+
                 failed_steps.add(step.step_id)
                 results['success'] = False
                 results['errors'].append({
                     'step_id': step.step_id,
                     'error': str(e)
                 })
-                
+
                 results['steps'].append(self._step_to_dict(step))
                 print(f"   [X] Failed: {e}\n")
-        
+
         # Calculate blocked steps
         blocked_steps = [s for s in steps if s.status == PlanStatus.BLOCKED]
 
@@ -518,6 +765,10 @@ Generate the plan now:
         print(f"   Completed: {len(completed_steps)}")
         print(f"   Failed: {len(failed_steps)}")
         print(f"   Blocked: {len(blocked_steps)}")
+        warnings = results.get('warnings', [])
+        print(f"   Recovery attempts: {results['recovery_attempts']}")
+        if warnings:
+            print(f"   Warnings: {len(warnings)}")
         print(f"   Success: {results['success']}")
         print()
 
@@ -621,22 +872,162 @@ Generate the plan now:
         step: PlanStep,
         task: str,
         previous_results: Dict,
-        context: Optional[Dict]
+        context: Optional[Dict],
+        error_context: Optional[str] = None
     ) -> str:
-        """Execute step using LLM when no tool is specified"""
-        prompt = f"""
-Execute this step:
+        """Execute step using LLM when no tool is specified or as fallback."""
+        # Truncate previous results to avoid prompt bloat
+        truncated_results = {}
+        for k, v in previous_results.items():
+            v_str = str(v)
+            truncated_results[k] = v_str[:500] + '...' if len(v_str) > 500 else v_str
 
-Original Task: {task}
-Current Step: {step.description}
-Previous Results: {json.dumps(previous_results, indent=2) if previous_results else 'None'}
-Context: {json.dumps(context, indent=2) if context else 'None'}
+        parts = [
+            f"Original Task: {task}",
+            f"Current Step: {step.description}",
+        ]
 
-Provide the result of this step.
-"""
+        if error_context:
+            parts.append(f"\nThe tool-based approach failed: {error_context}")
+            parts.append("Use your reasoning to accomplish this step instead.")
+
+        if truncated_results:
+            parts.append(f"\nPrevious Results: {json.dumps(truncated_results, indent=2)}")
+
+        if context:
+            parts.append(f"\nContext: {json.dumps(context, indent=2)}")
+
+        parts.append("\nProvide the result of this step concisely.")
+
+        prompt = "\n".join(parts)
         from raec_core.model_swarm import TaskType
         return self.llm.generate(prompt, temperature=0.6, max_tokens=512, task_type=TaskType.REASONING)
     
+    def _quick_verify_step_output(
+        self, tool_key: str, output: Any, step: PlanStep
+    ) -> Optional[str]:
+        """
+        Lightweight per-step verification. Returns a warning string if the output
+        looks problematic, or None if it looks OK. Does NOT use the LLM.
+        """
+        if output is None:
+            return "Output is None"
+
+        output_str = str(output)
+
+        # Check for empty output
+        if not output_str.strip():
+            return "Output is empty"
+
+        # Check for error strings in output (tool returned an error as a value)
+        error_prefixes = [
+            'Error:', 'HTTP GET error:', 'HTTP POST error:',
+            'Fetch error:', 'Download error:', 'Execution error:',
+            'Command error:', 'JSON parse error:',
+        ]
+        for prefix in error_prefixes:
+            if output_str.startswith(prefix):
+                return f"Output contains error: {output_str[:120]}"
+
+        # Check for HTML in output when tool shouldn't return HTML
+        non_html_tools = {
+            'web.fetch_text', 'web.fetch_json', 'data.parse_json',
+            'text.search_text', 'data.filter_list', 'data.count',
+            'code.run_python', 'code.run_shell',
+        }
+        if tool_key in non_html_tools and isinstance(output, str):
+            if '<html' in output_str[:200].lower() or '<!doctype' in output_str[:200].lower():
+                return "Output contains unexpected HTML"
+
+        # Check for error dicts
+        if isinstance(output, dict) and 'error' in output and len(output) <= 3:
+            return f"Output is error dict: {output.get('error', '')[:120]}"
+
+        return None
+
+    def _retry_with_corrected_params(
+        self,
+        step: PlanStep,
+        tool_key: str,
+        original_params: Dict,
+        error_msg: str,
+        task: str
+    ) -> Optional[Any]:
+        """
+        Ask the LLM to correct tool parameters and retry the tool call once.
+        Returns the tool output on success, or None if retry also fails.
+        """
+        # Only retry for param-related or HTTP errors, not for systemic issues
+        retryable_hints = [
+            'argument', 'param', 'type', 'missing', 'invalid', 'expected',
+            '400', '404', '403', '500', 'error:', 'timeout',
+        ]
+        error_lower = error_msg.lower()
+        if not any(hint in error_lower for hint in retryable_hints):
+            return None
+
+        print(f"   [~] Attempting param correction for {tool_key}...")
+
+        # Get the tool's actual signature for the LLM
+        fn = self.tools.interface.tools.get(tool_key)
+        if not fn:
+            return None
+
+        try:
+            sig = inspect.signature(fn)
+            sig_str = str(sig)
+        except (ValueError, TypeError):
+            sig_str = "(unknown)"
+
+        prompt = f"""A tool call failed. Fix the parameters and respond with ONLY the corrected JSON params.
+
+Tool: {tool_key}{sig_str}
+Step description: {step.description}
+Original task: {task}
+Original params: {json.dumps(original_params, default=str)[:500]}
+Error: {error_msg[:300]}
+
+Respond with ONLY a JSON object containing the corrected parameters. No explanation.
+Example: {{"param1": "value1", "param2": "value2"}}
+"""
+        try:
+            from raec_core.model_swarm import TaskType
+            correction = self.llm.generate(
+                prompt, temperature=0.3, max_tokens=256,
+                task_type=TaskType.PARAM_GENERATION
+            )
+
+            # Parse the corrected params
+            json_match = re.search(r'\{[^{}]+\}', correction, re.DOTALL)
+            if not json_match:
+                return None
+
+            corrected_params = json.loads(json_match.group(0))
+
+            # Validate corrected params
+            corrected_step = PlanStep(
+                step.step_id, step.description,
+                step.tool_category, step.tool_name, corrected_params
+            )
+            validated = self._validate_params(corrected_step, tool_key, fn)
+
+            if not validated:
+                return None
+
+            # Retry the tool call
+            print(f"   [~] Retrying {tool_key} with corrected params: {validated}")
+            retry_result = self.tools.execute(tool_key, **validated)
+
+            if retry_result.success:
+                return retry_result.output
+            else:
+                print(f"   [!] Retry also failed: {retry_result.error}")
+                return None
+
+        except Exception as e:
+            print(f"   [!] Param correction failed: {e}")
+            return None
+
     def _step_to_dict(self, step: PlanStep) -> Dict:
         """Convert step to dictionary"""
         return {
@@ -679,14 +1070,14 @@ Provide the result of this step.
             return -1
     
     def _store_execution_results(self, task: str, results: Dict, plan_id: int):
-        """Store execution results in memory"""
+        """Store execution results in memory, with failure analysis for failed plans."""
         try:
             from memory.memory_db import MemoryType
-            
+
             result_text = f"Execution results for: {task}\n"
             result_text += f"Success: {results['success']}\n"
             result_text += f"Completed steps: {len([s for s in results['steps'] if s['status'] == 'completed'])}"
-            
+
             result_id = self.memory.store(
                 content=result_text,
                 memory_type=MemoryType.EXPERIENCE,
@@ -700,12 +1091,134 @@ Provide the result of this step.
                 source='planner_execution',
                 linked_to=[plan_id] if plan_id > 0 else None
             )
-            
+
+            # W11: Failure analysis — extract beliefs from failed plans
+            if not results['success'] and results.get('errors'):
+                self._analyze_failure_and_store_beliefs(
+                    task, results, result_id
+                )
+
             # Note: Skill extraction is handled centrally in main.py after verification
             # to avoid duplicate skill creation
 
         except Exception as e:
             print(f"[!] Failed to store execution results: {e}")
+
+    def _analyze_failure_and_store_beliefs(
+        self, task: str, results: Dict, experience_id: int
+    ):
+        """
+        Analyze a failed plan execution and store structured beliefs
+        so future plans can avoid the same mistakes.
+
+        Extracts lessons from each error:
+        - Which tool failed and why
+        - What approach didn't work
+        - What should be done differently
+        """
+        from memory.memory_db import MemoryType
+
+        errors = results.get('errors', [])
+        steps = results.get('steps', [])
+
+        if not errors:
+            return
+
+        print("\n[~] Analyzing failure for belief formation...")
+
+        # Build structured error chain
+        error_chain = []
+        for err in errors:
+            step_id = err.get('step_id')
+            error_msg = str(err.get('error', 'unknown'))[:300]
+
+            # Find the step details
+            step_info = next(
+                (s for s in steps if s.get('step_id') == step_id), {}
+            )
+            tool_used = step_info.get('tool', 'unknown')
+            step_desc = step_info.get('description', '')[:200]
+
+            error_chain.append({
+                'step_id': step_id,
+                'tool': tool_used,
+                'description': step_desc,
+                'error': error_msg,
+            })
+
+        # Build a concise prompt for the LLM to extract beliefs
+        chain_text = "\n".join(
+            f"- Step {e['step_id']} ({e['tool']}): {e['description']}\n  Error: {e['error']}"
+            for e in error_chain[:5]
+        )
+
+        prompt = f"""A plan failed. Analyze the errors and extract 1-3 short lessons (beliefs) to avoid this failure in the future.
+
+Task: {task[:300]}
+Error chain:
+{chain_text}
+
+For each lesson, write ONE concise sentence stating what to do or avoid.
+Format each as a separate line starting with "BELIEF:".
+Example:
+BELIEF: arXiv API requires bracket syntax for date ranges, not slash syntax.
+BELIEF: HuggingFace blog pages return HTML, use web.fetch_text not web.fetch_json.
+"""
+        try:
+            from raec_core.model_swarm import TaskType
+            analysis = self.llm.generate(
+                prompt, temperature=0.3, max_tokens=300,
+                task_type=TaskType.REASONING
+            )
+
+            # Parse beliefs from response
+            beliefs = []
+            for line in analysis.split('\n'):
+                line = line.strip()
+                if line.upper().startswith('BELIEF:'):
+                    belief_text = line[len('BELIEF:'):].strip()
+                    if belief_text and len(belief_text) > 10:
+                        beliefs.append(belief_text)
+
+            # Store each belief in memory
+            for belief_text in beliefs[:3]:  # Cap at 3 beliefs per failure
+                belief_id = self.memory.store(
+                    content=belief_text,
+                    memory_type=MemoryType.BELIEF,
+                    metadata={
+                        'source_task': task[:200],
+                        'error_chain': error_chain[:3],
+                        'auto_extracted': True,
+                    },
+                    confidence=0.7,  # Start moderate, evolve with evidence
+                    source='failure_analysis',
+                    linked_to=[experience_id]
+                )
+                print(f"   [+] Belief stored: {belief_text}")
+
+            if not beliefs:
+                # Fallback: store a simple heuristic belief from the first error
+                first_err = error_chain[0] if error_chain else {}
+                fallback_belief = (
+                    f"Tool {first_err.get('tool', '?')} failed for task like "
+                    f"'{task[:80]}': {first_err.get('error', 'unknown')[:120]}"
+                )
+                self.memory.store(
+                    content=fallback_belief,
+                    memory_type=MemoryType.BELIEF,
+                    metadata={
+                        'source_task': task[:200],
+                        'auto_extracted': True,
+                        'fallback': True,
+                    },
+                    confidence=0.5,
+                    source='failure_analysis',
+                    linked_to=[experience_id]
+                )
+                print(f"   [+] Fallback belief stored: {fallback_belief[:100]}...")
+
+        except Exception as e:
+            print(f"   [!] Failure analysis failed: {e}")
 
 
 # Backward compatibility

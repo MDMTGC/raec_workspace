@@ -225,8 +225,8 @@ class LogicChecker:
         expected: Optional[Any],
         context: Optional[Dict]
     ) -> VerificationResult:
-        """Verify output correctness"""
-        
+        """Verify output correctness, including plan execution results."""
+
         # If we have expected output, compare directly
         if expected is not None:
             if output == expected:
@@ -251,8 +251,13 @@ class LogicChecker:
                         "Consider edge cases that might cause differences"
                     ]
                 )
-        
-        # Check for error indicators with context awareness
+
+        # ── Plan result verification ────────────────────────────────
+        # If the output is a plan execution dict, verify the plan actually succeeded
+        if isinstance(output, dict) and 'steps' in output and 'success' in output:
+            return self._verify_plan_result(output, context)
+
+        # ── String-based output verification ────────────────────────
         output_str = str(output).lower()
 
         # Patterns that indicate ACTUAL errors (not just the word "error")
@@ -301,7 +306,7 @@ class LogicChecker:
                         details={'output_preview': str(output)[:200], 'pattern': pattern},
                         suggestions=["Review error message and fix underlying issue"]
                     )
-        
+
         # Check for empty/null output
         if not output or output == "" or output == "None":
             return VerificationResult(
@@ -312,7 +317,7 @@ class LogicChecker:
                 details={},
                 suggestions=["Verify that the operation produced results"]
             )
-        
+
         # If we reach here, output seems reasonable
         return VerificationResult(
             level=VerificationLevel.OUTPUT,
@@ -320,6 +325,94 @@ class LogicChecker:
             severity=SeverityLevel.INFO,
             message="Output appears valid",
             details={},
+            suggestions=[]
+        )
+
+    def _verify_plan_result(
+        self,
+        plan_result: Dict,
+        context: Optional[Dict]
+    ) -> VerificationResult:
+        """
+        Verify a plan execution result by checking step outcomes,
+        not just string pattern matching.
+        """
+        steps = plan_result.get('steps', [])
+        success_flag = plan_result.get('success', False)
+        errors = plan_result.get('errors', [])
+
+        if not steps:
+            return VerificationResult(
+                level=VerificationLevel.OUTPUT,
+                passed=False,
+                severity=SeverityLevel.ERROR,
+                message="Plan produced no execution steps",
+                details={'plan_result': str(plan_result)[:300]},
+                suggestions=["Ensure the planner generates actionable steps"]
+            )
+
+        total = len(steps)
+        completed = sum(1 for s in steps if s.get('status') == 'completed')
+        failed = sum(1 for s in steps if s.get('status') == 'failed')
+        blocked = sum(1 for s in steps if s.get('status') == 'blocked')
+
+        completion_rate = completed / total if total else 0.0
+
+        details = {
+            'total_steps': total,
+            'completed': completed,
+            'failed': failed,
+            'blocked': blocked,
+            'completion_rate': f"{completion_rate:.0%}",
+            'errors': errors[:5],
+        }
+
+        # Hard fail: plan itself reports failure
+        if not success_flag:
+            suggestions = ["Review failed steps and fix tool parameters or plan logic"]
+            if errors:
+                suggestions.append(f"First error: {errors[0].get('error', 'unknown')[:120]}")
+            return VerificationResult(
+                level=VerificationLevel.OUTPUT,
+                passed=False,
+                severity=SeverityLevel.ERROR,
+                message=f"Plan execution failed: {completed}/{total} steps completed, {failed} failed, {blocked} blocked",
+                details=details,
+                suggestions=suggestions
+            )
+
+        # Soft fail: majority of steps didn't complete
+        if completion_rate < 0.5:
+            return VerificationResult(
+                level=VerificationLevel.OUTPUT,
+                passed=False,
+                severity=SeverityLevel.ERROR,
+                message=f"Plan had low completion rate ({completion_rate:.0%}): {completed}/{total} steps",
+                details=details,
+                suggestions=[
+                    "Too many steps failed or were blocked",
+                    "Consider simplifying the plan or fixing upstream failures"
+                ]
+            )
+
+        # Warning: some failures but majority completed
+        if failed > 0 or blocked > 0:
+            return VerificationResult(
+                level=VerificationLevel.OUTPUT,
+                passed=True,
+                severity=SeverityLevel.WARNING,
+                message=f"Plan partially succeeded: {completed}/{total} steps ({failed} failed, {blocked} blocked)",
+                details=details,
+                suggestions=["Review failed/blocked steps for potential improvements"]
+            )
+
+        # Full success
+        return VerificationResult(
+            level=VerificationLevel.OUTPUT,
+            passed=True,
+            severity=SeverityLevel.INFO,
+            message=f"Plan completed successfully: all {total} steps passed",
+            details=details,
             suggestions=[]
         )
     

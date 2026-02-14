@@ -21,13 +21,13 @@ class FileTools:
     
     @staticmethod
     def read_file(filepath: str) -> str:
-        """Read a text file. Raises exception on failure."""
+        """Read a text file. Returns file content as string."""
         with open(filepath, 'r', encoding='utf-8') as f:
             return f.read()
     
     @staticmethod
     def write_file(filepath: str, content: str) -> str:
-        """Write content to a file. Raises exception on failure."""
+        """Write content to a file. Returns success message string."""
         # Handle directory creation only if there's a directory component
         dir_path = os.path.dirname(filepath)
         if dir_path:
@@ -46,7 +46,7 @@ class FileTools:
     
     @staticmethod
     def list_directory(dirpath: str) -> str:
-        """List files in a directory"""
+        """List files in a directory. Returns newline-separated listing string."""
         try:
             items = os.listdir(dirpath)
             result = []
@@ -97,7 +97,7 @@ class WebTools:
     
     @staticmethod
     def http_get(url: str, timeout: int = 10) -> str:
-        """Make HTTP GET request"""
+        """Make HTTP GET request. Returns raw response text (often HTML)."""
         try:
             import requests
             response = requests.get(url, timeout=timeout)
@@ -110,7 +110,7 @@ class WebTools:
     
     @staticmethod
     def http_post(url: str, data: Dict, timeout: int = 10) -> str:
-        """Make HTTP POST request"""
+        """Make HTTP POST request. Returns raw response text."""
         try:
             import requests
             response = requests.post(url, json=data, timeout=timeout)
@@ -122,16 +122,118 @@ class WebTools:
             return f"HTTP POST error: {e}"
     
     @staticmethod
+    def extract_text(html: str, max_length: int = 10000) -> str:
+        """Extract readable text from HTML, stripping tags and scripts. Returns plain text string."""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Remove script and style elements
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'noscript']):
+                tag.decompose()
+
+            # Extract text
+            text = soup.get_text(separator='\n', strip=True)
+
+            # Collapse blank lines
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            clean_text = '\n'.join(lines)
+
+            if len(clean_text) > max_length:
+                clean_text = clean_text[:max_length] + '\n... [truncated]'
+
+            return clean_text
+        except ImportError:
+            # Fallback: regex-based tag stripping
+            import re
+            text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            if len(text) > max_length:
+                text = text[:max_length] + '... [truncated]'
+            return text
+
+    @staticmethod
+    def extract_links(html: str) -> list:
+        """Extract all hyperlinks from HTML. Returns list of {url, text} dicts."""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+            links = []
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                text = a.get_text(strip=True)
+                links.append({'url': href, 'text': text})
+            return links
+        except ImportError:
+            import re
+            return [{'url': m, 'text': ''} for m in re.findall(r'href=["\']([^"\']+)', html)]
+
+    @staticmethod
+    def fetch_text(url: str, timeout: int = 15, max_length: int = 10000) -> str:
+        """Fetch a web page and return extracted readable text (HTML tags stripped). Returns text string."""
+        try:
+            import requests
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            html = response.text
+            return WebTools.extract_text(html, max_length=max_length)
+        except ImportError:
+            return "Error: requests library not installed"
+        except Exception as e:
+            return f"Fetch error: {e}"
+
+    @staticmethod
+    def fetch_json(url: str, timeout: int = 15) -> Any:
+        """Fetch a URL that returns JSON and parse it. Returns parsed dict/list or error dict."""
+        try:
+            import requests
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+
+            content_type = response.headers.get('content-type', '')
+            if 'json' not in content_type and 'javascript' not in content_type:
+                # Try parsing anyway — some APIs don't set content-type correctly
+                pass
+
+            try:
+                return response.json()
+            except Exception:
+                return {
+                    'error': 'Response is not valid JSON',
+                    'content_type': content_type,
+                    'preview': response.text[:500]
+                }
+        except ImportError:
+            return {'error': 'requests library not installed'}
+        except Exception as e:
+            return {'error': f"Fetch error: {e}"}
+
+    @staticmethod
+    def fetch_links(url: str, timeout: int = 15) -> list:
+        """Fetch a web page and return all hyperlinks found. Returns list of {url, text} dicts."""
+        try:
+            import requests
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            return WebTools.extract_links(response.text)
+        except ImportError:
+            return [{'error': 'requests library not installed'}]
+        except Exception as e:
+            return [{'error': f"Fetch error: {e}"}]
+
+    @staticmethod
     def download_file(url: str, save_path: str) -> str:
         """Download file from URL"""
         try:
             import requests
             response = requests.get(url, timeout=30)
             response.raise_for_status()
-            
+
             with open(save_path, 'wb') as f:
                 f.write(response.content)
-            
+
             return f"Downloaded {len(response.content)} bytes to {save_path}"
         except ImportError:
             return "Error: requests library not installed"
@@ -143,8 +245,8 @@ class DataTools:
     """Data processing operations"""
     
     @staticmethod
-    def parse_json(json_str: str) -> Any:
-        """Parse JSON string"""
+    def parse_json(json_str: str, **_kwargs) -> Any:
+        """Parse JSON string. Returns parsed data or error dict."""
         try:
             return json.loads(json_str)
         except Exception as e:
@@ -186,7 +288,7 @@ class DataTools:
     
     @staticmethod
     def filter_list(data: List[Any], condition: str) -> List[Any]:
-        """Filter list based on condition (string contains or extension patterns)"""
+        """Filter list items matching condition string. Returns filtered list."""
         try:
             # If data is a string (e.g., newline-separated), split it
             if isinstance(data, str):
@@ -219,7 +321,7 @@ class DataTools:
     
     @staticmethod
     def count(data: Any) -> int:
-        """Count items in a list or characters/lines in a string"""
+        """Count items in a list or lines in a string. Returns integer."""
         try:
             if isinstance(data, str):
                 # Handle escaped newlines
@@ -250,7 +352,7 @@ class CodeTools:
     
     @staticmethod
     def run_python(code: str, timeout: int = 10, cwd: str = None) -> str:
-        """Execute Python code safely, optionally in a specified working directory"""
+        """Execute Python code safely. Returns stdout output string."""
         try:
             # Use current working directory if not specified
             work_dir = cwd or os.getcwd()
@@ -281,7 +383,7 @@ class CodeTools:
     
     @staticmethod
     def run_shell(command: str, timeout: int = 10, cwd: str = None) -> str:
-        """Execute shell command, optionally in a specified working directory"""
+        """Execute shell command. Returns stdout output string."""
         try:
             work_dir = cwd or os.getcwd()
             result = subprocess.run(
@@ -305,7 +407,7 @@ class CodeTools:
     
     @staticmethod
     def validate_python(code: str) -> Dict[str, Any]:
-        """Check if Python code is syntactically valid"""
+        """Check if Python code is syntactically valid. Returns {valid: bool, error: str|None}."""
         import ast
         try:
             ast.parse(code)
@@ -334,7 +436,7 @@ class TextTools:
     
     @staticmethod
     def search_text(text: str, pattern: str, case_sensitive: bool = False) -> List[str]:
-        """Search for pattern in text"""
+        """Search for regex pattern in text. Returns list of matching strings."""
         import re
         flags = 0 if case_sensitive else re.IGNORECASE
         matches = re.findall(pattern, text, flags)

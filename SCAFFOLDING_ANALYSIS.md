@@ -141,7 +141,7 @@ These reduce planner complexity and eliminate the most common failure mode (wron
 5. **W4 - Retry strategy** — Per-tool-category retry with param correction
 6. **W6 - Per-step verification** — Catch failures early in standard mode
 
-### Phase 3: Learning & Integration (After)
+### Phase 3: Learning & Integration — COMPLETED
 7. **W11 - Failure analysis** — Turn failures into beliefs for future avoidance
 8. **W5 - Task-objective verification** — Enable semantic check in standard mode
 9. **W7 - Collaborative mode tools** — Wire ToolEnabledPlanner into multi-agent executor

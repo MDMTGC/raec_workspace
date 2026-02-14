@@ -14,7 +14,7 @@ import sys
 import os
 import yaml
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 # Path Setup
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -491,17 +491,21 @@ Just describe what you need and I'll plan the approach."""
         # No skill - run planner
         plan_result = self.planner.run(task, context)
         
-        # Verify results
+        # Verify results (structural + semantic)
         print("\n[?] Verifying execution results...")
         passed, verification_results = self.evaluator.verify(
             output=plan_result,
-            verification_levels=[VerificationLevel.LOGIC, VerificationLevel.OUTPUT],
+            verification_levels=[
+                VerificationLevel.LOGIC,
+                VerificationLevel.OUTPUT,
+                VerificationLevel.SEMANTIC,  # W5: task-objective check
+            ],
             context={'task': task}
         )
-        
+
         if passed:
             print("   [OK] Verification passed\n")
-            
+
             # Consider skill extraction
             self._consider_skill_extraction(task, plan_result, verification_results)
         else:
@@ -531,12 +535,13 @@ Just describe what you need and I'll plan the approach."""
         """
         print("[=] MODE: Collaborative Multi-Agent\n")
         
-        # Use multi-agent orchestrator with tools for real execution
+        # W7: Pass planner so executor agent can use ToolEnabledPlanner
         workflow_result = self.orchestrator.execute_workflow(
             workflow_name="collaborative_task",
             initial_task=task,
             required_roles=[AgentRole.PLANNER, AgentRole.EXECUTOR, AgentRole.CRITIC],
-            tools=self.tools  # Pass tools so executor can actually execute
+            tools=self.tools,
+            planner=self.planner
         )
         
         # Store workflow in memory
@@ -626,46 +631,94 @@ Provide 5-7 numbered steps showing your reasoning process.
         verification_results: list
     ):
         """
-        Determine if successful execution should become a skill
+        Determine if successful execution should become a skill.
+        W12: Also extract step-level skills from partial successes.
         """
-        # Only extract if successful and verified
-        if not result.get('success'):
-            return
-        
-        print("[!] Considering skill extraction...")
-        
-        # Extract solution pattern from plan steps
         steps = result.get('steps', [])
         if not steps:
             return
-        
-        solution_pattern = "\n".join([
-            f"{s['step_id']}. {s['description']}" 
-            for s in result.get('steps', [])
-            if s.get('status') == 'completed'
-        ])
-        
-        # Determine category (heuristic)
+
+        completed = [s for s in steps if s.get('status') == 'completed']
+
+        if result.get('success') and completed:
+            # Full success — extract whole-plan skill
+            print("[!] Considering skill extraction...")
+
+            solution_pattern = "\n".join([
+                f"{s['step_id']}. {s['description']}"
+                for s in completed
+            ])
+
+            category = self._categorize_task(task)
+
+            skill_id = self.skills.extract_skill(
+                task_description=task,
+                solution=solution_pattern,
+                execution_result=result,
+                category=category
+            )
+
+            print(f"   [OK] Skill extracted (ID: {skill_id[:8]}...)")
+            print(f"   Status: CANDIDATE - needs verification before reuse\n")
+
+        elif not result.get('success') and len(completed) >= 2:
+            # W12: Partial success — extract step-level skills from
+            # completed tool-based steps (at least 2 to be meaningful)
+            self._extract_step_level_skills(task, completed)
+
+    def _categorize_task(self, task: str) -> SkillCategory:
+        """Determine skill category from task description."""
         task_lower = task.lower()
         if any(word in task_lower for word in ['parse', 'process', 'transform', 'data']):
-            category = SkillCategory.DATA_PROCESSING
+            return SkillCategory.DATA_PROCESSING
         elif any(word in task_lower for word in ['code', 'write', 'implement', 'function']):
-            category = SkillCategory.CODE_GENERATION
+            return SkillCategory.CODE_GENERATION
         elif any(word in task_lower for word in ['plan', 'break', 'decompose']):
-            category = SkillCategory.PLANNING
+            return SkillCategory.PLANNING
+        elif any(word in task_lower for word in ['fetch', 'http', 'web', 'url', 'api']):
+            return SkillCategory.TOOL_USAGE
         else:
-            category = SkillCategory.REASONING
-        
-        # Extract skill
-        skill_id = self.skills.extract_skill(
-            task_description=task,
-            solution=solution_pattern,
-            execution_result=result,
-            category=category
-        )
-        
-        print(f"   [OK] Skill extracted (ID: {skill_id[:8]}...)")
-        print(f"   Status: CANDIDATE - needs verification before reuse\n")
+            return SkillCategory.REASONING
+
+    def _extract_step_level_skills(self, task: str, completed_steps: List[Dict]):
+        """
+        W12: Extract skills from individual successful steps in a partially-failed plan.
+        Only extracts from steps that used tools (not LLM reasoning fallbacks).
+        """
+        print("[!] Extracting step-level skills from partial success...")
+
+        extracted = 0
+        for step in completed_steps:
+            tool = step.get('tool')
+            if not tool:
+                continue  # Skip LLM-only steps
+
+            desc = step.get('description', '')
+            result_preview = str(step.get('result', ''))[:200]
+
+            # Build a mini solution pattern from this single step
+            solution = f"TOOL: {tool}\nPARAMS: {step.get('params', {})}"
+
+            category = self._categorize_task(desc)
+
+            try:
+                self.skills.extract_skill(
+                    task_description=f"Step from '{task[:80]}': {desc}",
+                    solution=solution,
+                    execution_result={
+                        'success': True,
+                        'step_result': result_preview,
+                        'tool': tool,
+                    },
+                    category=category,
+                    name=f"Step: {desc[:40]}"
+                )
+                extracted += 1
+            except Exception:
+                pass  # Don't fail other extractions
+
+        if extracted:
+            print(f"   [OK] Extracted {extracted} step-level skill(s)\n")
     
     def curate_memory(self, force: bool = False) -> Dict[str, Any]:
         """

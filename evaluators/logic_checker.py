@@ -417,7 +417,12 @@ class LogicChecker:
         )
     
     def _verify_semantic(self, output: Any, context: Optional[Dict]) -> VerificationResult:
-        """Verify semantic consistency using LLM"""
+        """
+        Verify task-objective completion using LLM (W5).
+
+        Instead of generic consistency checks, this asks: "Did the output
+        actually accomplish what the task requested?"
+        """
         if not self.llm:
             return VerificationResult(
                 level=VerificationLevel.SEMANTIC,
@@ -427,39 +432,59 @@ class LogicChecker:
                 details={},
                 suggestions=[]
             )
-        
-        # Use LLM to check semantic consistency
+
+        task = (context or {}).get('task', '')
+        if not task:
+            return VerificationResult(
+                level=VerificationLevel.SEMANTIC,
+                passed=True,
+                severity=SeverityLevel.INFO,
+                message="Semantic verification skipped (no task in context)",
+                details={},
+                suggestions=[]
+            )
+
+        # Build a concise summary of the output for the LLM
+        if isinstance(output, dict):
+            steps = output.get('steps', [])
+            completed = [s for s in steps if s.get('status') == 'completed']
+            step_summary = "\n".join(
+                f"- {s.get('description', '?')}: {str(s.get('result', ''))[:120]}"
+                for s in completed[:8]
+            )
+            output_summary = f"Steps completed ({len(completed)}/{len(steps)}):\n{step_summary}"
+        else:
+            output_summary = str(output)[:800]
+
         try:
-            prompt = f"""
-Analyze the following output for semantic consistency and correctness:
+            prompt = f"""Does this execution result accomplish the user's task objective?
 
-Output: {output}
+Task: {task[:400]}
 
-Context: {json.dumps(context or {}, indent=2)}
+Result:
+{output_summary[:600]}
 
-Check for:
-1. Internal consistency
-2. Logical flow
-3. Completeness
-4. Clarity
-
-Respond with: [PASS] or [FAIL] followed by brief explanation.
+Respond with ONLY [PASS] or [FAIL] followed by ONE sentence explaining why.
+[PASS] means the task objective was meaningfully addressed.
+[FAIL] means the output does NOT satisfy what was asked for.
 """
-            
-            result = self.llm.generate(prompt, temperature=0.2, max_tokens=200)
-            
-            passed = result.strip().startswith('[PASS]')
+            result = self.llm.generate(prompt, temperature=0.2, max_tokens=150)
+
+            passed = result.strip().upper().startswith('[PASS]')
             explanation = result.replace('[PASS]', '').replace('[FAIL]', '').strip()
-            
+
             return VerificationResult(
                 level=VerificationLevel.SEMANTIC,
                 passed=passed,
                 severity=SeverityLevel.WARNING if not passed else SeverityLevel.INFO,
-                message=explanation[:200],
-                details={'llm_analysis': result},
-                suggestions=["Address semantic issues noted by LLM"] if not passed else []
+                message=f"Task-objective check: {explanation[:200]}",
+                details={'llm_analysis': result, 'task': task[:200]},
+                suggestions=[
+                    "Output did not satisfy the task objective",
+                    "Review whether the plan steps address the actual request"
+                ] if not passed else []
             )
-            
+
         except Exception as e:
             return VerificationResult(
                 level=VerificationLevel.SEMANTIC,

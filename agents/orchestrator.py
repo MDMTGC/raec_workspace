@@ -172,14 +172,17 @@ Provide a numbered plan with clear steps.
     def _process_as_executor(self, message: Message, context: Dict) -> Optional[Message]:
         """Process message as an executor agent"""
         if message.message_type == MessageType.TASK:
-            # Check if we have a tool executor in context
+            # W7: Prefer ToolEnabledPlanner for full plan→execute→verify pipeline
+            planner = context.get('planner')
             tools = context.get('tools')
 
-            if tools:
-                # Execute using actual tools
+            if planner:
+                result = self._execute_with_planner(message.content, planner)
+            elif tools:
+                # Fallback: single-tool-call execution
                 result = self._execute_with_tools(message.content, tools, context)
             else:
-                # Fallback to LLM reasoning
+                # Last resort: LLM reasoning only
                 prompt = f"""
 You are an execution agent. Complete the following task:
 
@@ -202,6 +205,31 @@ Describe your execution approach and results.
             )
 
         return None
+
+    def _execute_with_planner(self, task: str, planner) -> str:
+        """
+        Execute task using ToolEnabledPlanner (W7).
+        Gives collaborative mode the same plan→execute→verify pipeline
+        as standard mode.
+        """
+        try:
+            plan_result = planner.run(task)
+            success = plan_result.get('success', False)
+            steps = plan_result.get('steps', [])
+            completed = [s for s in steps if s.get('status') == 'completed']
+
+            summary_lines = [
+                f"Plan {'succeeded' if success else 'failed'}: "
+                f"{len(completed)}/{len(steps)} steps completed."
+            ]
+            for s in completed[:5]:
+                desc = s.get('description', '?')
+                res = str(s.get('result', ''))[:120]
+                summary_lines.append(f"- {desc}: {res}")
+
+            return "\n".join(summary_lines)
+        except Exception as e:
+            return f"Planner execution failed: {e}"
 
     def _execute_with_tools(self, task: str, tools, context: Dict) -> str:
         """Execute task using actual tool executor"""
@@ -448,7 +476,8 @@ class MultiAgentOrchestrator:
         workflow_name: str,
         initial_task: str,
         required_roles: Optional[List[AgentRole]] = None,
-        tools=None
+        tools=None,
+        planner=None
     ) -> Dict[str, Any]:
         """
         Execute a collaborative workflow
@@ -458,6 +487,7 @@ class MultiAgentOrchestrator:
             initial_task: Starting task
             required_roles: Agents needed for the workflow
             tools: Optional ToolExecutor for real tool execution
+            planner: Optional ToolEnabledPlanner for full plan-execute pipeline (W7)
 
         Returns:
             Workflow results
@@ -472,12 +502,13 @@ class MultiAgentOrchestrator:
             for role in required_roles:
                 if not any(a.role == role for a in self.agents.values()):
                     self.create_agent(role, capabilities=[f"{role.value}_ops"])
-        
+
         # Initialize workflow context
         self.shared_context['workflow'] = workflow_name
         self.shared_context['initial_task'] = initial_task
         self.shared_context['start_time'] = time.time()
         self.shared_context['tools'] = tools  # Pass tools for executor agent
+        self.shared_context['planner'] = planner  # W7: full planner for executor
 
         # Clear message bus
         self.message_bus = []

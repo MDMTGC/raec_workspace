@@ -20,14 +20,16 @@ class ActionExecutor:
     NO LLM thinking, NO planning delays, JUST ACTION.
     """
     
-    def __init__(self, tools):
+    def __init__(self, tools, memory=None):
         """
         Initialize with tool interface
-        
+
         Args:
             tools: ToolInterface instance for actual execution
+            memory: Optional HierarchicalMemoryDB for post-execution learning (W8)
         """
         self.tools = tools
+        self.memory = memory
         self.execution_log = []
     
     def execute_action(self, task: str) -> Dict[str, Any]:
@@ -78,7 +80,7 @@ class ActionExecutor:
         result = handler(task)
         result['execution_time'] = time.time() - start_time
         result['action_type'] = action_type
-        
+
         # Log
         self.execution_log.append({
             'task': task,
@@ -86,7 +88,10 @@ class ActionExecutor:
             'success': result.get('success'),
             'time': result['execution_time']
         })
-        
+
+        # W8: Post-execution learning hook — store in memory
+        self._store_execution_memory(task, action_type, result)
+
         return result
     
     def detect_action_type(self, task: str) -> Optional[str]:
@@ -511,6 +516,66 @@ class ActionExecutor:
             'message': 'Data processing needs more specific implementation'
         }
     
+    def _store_execution_memory(self, task: str, action_type: str, result: Dict[str, Any]):
+        """
+        W8: Post-execution learning hook.
+        Stores fast-path execution results as EXPERIENCE memories so the
+        system can learn from ActionExecutor runs, not just planner runs.
+        Only stores failures and notable successes to avoid memory bloat.
+        """
+        if not self.memory:
+            return
+
+        try:
+            from memory.memory_db import MemoryType
+
+            success = result.get('success', False)
+
+            # Always store failures (learning opportunities)
+            if not success:
+                error = result.get('error', result.get('message', 'unknown'))
+                content = (
+                    f"ActionExecutor failed: {action_type} for '{task[:100]}' — {str(error)[:200]}"
+                )
+                self.memory.store(
+                    content=content,
+                    memory_type=MemoryType.EXPERIENCE,
+                    metadata={
+                        'action_type': action_type,
+                        'task': task[:200],
+                        'success': False,
+                        'error': str(error)[:300],
+                        'execution_time': result.get('execution_time'),
+                    },
+                    confidence=0.5,
+                    source='action_executor'
+                )
+            else:
+                # Store successes only periodically (every 5th) to avoid bloat
+                success_count = sum(
+                    1 for e in self.execution_log if e.get('success')
+                )
+                if success_count % 5 == 0:
+                    content = (
+                        f"ActionExecutor succeeded: {action_type} for '{task[:100]}' "
+                        f"in {result.get('execution_time', 0):.2f}s"
+                    )
+                    self.memory.store(
+                        content=content,
+                        memory_type=MemoryType.EXPERIENCE,
+                        metadata={
+                            'action_type': action_type,
+                            'task': task[:200],
+                            'success': True,
+                            'execution_time': result.get('execution_time'),
+                        },
+                        confidence=1.0,
+                        source='action_executor'
+                    )
+        except Exception as e:
+            # Non-critical — don't fail the action for a memory error
+            pass
+
     def get_execution_stats(self) -> Dict[str, Any]:
         """Get execution statistics"""
         total = len(self.execution_log)

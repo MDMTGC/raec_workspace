@@ -1,7 +1,7 @@
 # Raec Configuration - Logic-First / Internet Architect 
 model:
-  name: raec:latest # Or the specific 32B/70B model you are using
-  device: cuda
+  name: raec:latest # Custom DeepSeek R1 32B Q4_K_M with RAEC system prompt
+  device: rocm  # AMD Radeon RX 7900 XT (20GB)
 
 memory:
   # Using a fresh DB to ensure the 'Sword' lore is truly gone

@@ -63,36 +63,36 @@ class TaskType(Enum):
 # - 3B "ganglia" for routing (<50ms)
 # - SSM/Mamba for memory curation (linear scaling)
 DEFAULT_MODEL_MAP = {
-    # Orchestrator - needs strong reasoning (32B+)
-    TaskType.REASONING: "raec:latest",
-    TaskType.SYNTHESIS: "raec:latest",
-    TaskType.PLANNING: "raec:latest",
-    TaskType.ERROR_RECOVERY: "raec:latest",
+    # Orchestrator - DeepSeek R1 32B for strong reasoning
+    TaskType.REASONING: "deepseek-r1:32b",
+    TaskType.SYNTHESIS: "deepseek-r1:32b",
+    TaskType.PLANNING: "deepseek-r1:32b",
+    TaskType.ERROR_RECOVERY: "deepseek-r1:32b",
 
     # Coder - code-specialized models (4-7B sweet spot)
-    TaskType.CODE_GENERATION: "raec:latest",  # -> qwen2.5-coder:7b when available
-    TaskType.CODE_ANALYSIS: "raec:latest",
-    TaskType.BUG_DETECTION: "raec:latest",
-    TaskType.CODE_REVIEW: "raec:latest",
-    TaskType.SYNTAX_REPAIR: "raec:latest",  # -> 3B is often enough for syntax
+    TaskType.CODE_GENERATION: "qwen2.5-coder:7b",
+    TaskType.CODE_ANALYSIS: "qwen2.5-coder:7b",
+    TaskType.BUG_DETECTION: "qwen2.5-coder:7b",
+    TaskType.CODE_REVIEW: "qwen2.5-coder:7b",
+    TaskType.SYNTAX_REPAIR: "qwen3:4b",
 
     # Router/Tool agent - 3B "ganglia" class (<50ms, ~2GB VRAM)
-    TaskType.TOOL_SELECTION: "raec:latest",  # -> phi4-mini:3b when available
-    TaskType.PARAM_GENERATION: "raec:latest",
-    TaskType.ROUTING: "raec:latest",
-    TaskType.INTENT_CLASSIFICATION: "raec:latest",
+    TaskType.TOOL_SELECTION: "qwen3:4b",
+    TaskType.PARAM_GENERATION: "qwen3:4b",
+    TaskType.ROUTING: "phi4-mini:latest",
+    TaskType.INTENT_CLASSIFICATION: "phi4-mini:latest",
 
-    # Data agent - 3B class
-    TaskType.JSON_PARSING: "raec:latest",
-    TaskType.DATA_TRANSFORM: "raec:latest",
-    TaskType.EXTRACTION: "raec:latest",
+    # Data agent - 3-4B class
+    TaskType.JSON_PARSING: "qwen3:4b",
+    TaskType.DATA_TRANSFORM: "qwen3:4b",
+    TaskType.EXTRACTION: "qwen3:4b",
 
     # Curator - SSM/Mamba for memory operations (linear scaling)
     # CRITICAL: Don't use transformers for these - O(n²) will explode on long logs
-    TaskType.MEMORY_DIGEST: "raec:latest",  # -> falcon-h1r or jamba-mini
-    TaskType.LOG_COMPRESSION: "raec:latest",
-    TaskType.HISTORY_SUMMARY: "raec:latest",
-    TaskType.CONTEXT_CURATION: "raec:latest",
+    TaskType.MEMORY_DIGEST: "jamba-reasoning:3b",
+    TaskType.LOG_COMPRESSION: "jamba-reasoning:3b",
+    TaskType.HISTORY_SUMMARY: "jamba-reasoning:3b",
+    TaskType.CONTEXT_CURATION: "jamba-reasoning:3b",
 
     # Fallback
     TaskType.DEFAULT: "raec:latest",

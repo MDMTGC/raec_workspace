@@ -1,9 +1,9 @@
 {
   "model_map": {
-    "reasoning": "qwen3:14b",
-    "synthesis": "qwen3:14b",
-    "planning": "qwen3:14b",
-    "error_recovery": "qwen3:14b",
+    "reasoning": "deepseek-r1:32b",
+    "synthesis": "deepseek-r1:32b",
+    "planning": "deepseek-r1:32b",
+    "error_recovery": "deepseek-r1:32b",
 
     "code_generation": "qwen2.5-coder:7b",
     "code_analysis": "qwen2.5-coder:7b",
@@ -27,7 +27,7 @@
 
     "default": "raec:latest"
   },
-  "fallback_model": "raec:latest",
+  "fallback_model": "qwen3:14b",
 
   "architecture_2026_validated": {
     "research_date": "February 5, 2026",
@@ -42,16 +42,16 @@
 
     "tiers": {
       "orchestrator": {
-        "size": "14B (optimized from 32B)",
-        "vram": "~10GB",
+        "size": "32B Q4_K_M",
+        "vram": "~19GB",
         "role": "Complex reasoning, planning, synthesis",
         "validated_models": [
-          "qwen3:14b (CURRENT: rivals 32B quality at 2x speed)",
-          "deepseek-r1:32b (fallback, strong reasoning)",
-          "qwen2.5:32b (fallback, strong general purpose)"
+          "deepseek-r1:32b (CURRENT: strongest reasoning, chain-of-thought)",
+          "qwen3:14b (FALLBACK: 2x faster, lower VRAM, used when 32B unavailable)",
+          "qwen2.5:32b (alternative, strong general purpose)"
         ],
         "task_types": ["reasoning", "synthesis", "planning", "error_recovery"],
-        "optimization_note": "14B achieves comparable ArenaHard scores to 32B with ~2x faster inference"
+        "note": "32B fills 20GB AMD 7900 XT. Ollama auto-unloads between model switches. Fallback changed to qwen3:14b for VRAM headroom."
       },
 
       "coder": {
@@ -100,13 +100,16 @@
       }
     },
 
-    "vram_budget_example": {
-      "gpu": "RTX 4090 (24GB)",
+    "vram_budget": {
+      "gpu": "AMD Radeon RX 7900 XT (20GB)",
+      "strategy": "Serial model loading — Ollama auto-unloads between switches",
       "allocation": {
-        "orchestrator_32B": "~19GB (quantized Q4)",
-        "ganglia_3B": "~2GB (fits in margin)",
-        "total": "~21GB (leaves headroom)"
-      }
+        "orchestrator_32B_Q4": "~19GB (fills VRAM, no concurrent models)",
+        "coder_7B": "~5GB (loads after 32B unloads)",
+        "ganglia_3B": "~2GB (fast swap)",
+        "curator_SSM_3B": "~2GB (fast swap)"
+      },
+      "note": "20GB VRAM cannot co-host 32B + other models. Ollama serial loading handles this automatically."
     }
   },
 

@@ -646,15 +646,23 @@ Generate the plan now:
                         **resolved_params
                     )
 
-                    # Check ToolResult.success flag
+                    # Check ToolResult.success flag, then verify output content
+                    warning = None
                     if step_result.success:
-                        # Per-step verification: catch subtle failures
                         warning = self._quick_verify_step_output(
                             tool_key, step_result.output, step
                         )
-                        if warning:
+                        if warning and ("contains error" in warning.lower() or "error dict" in warning.lower()):
+                            # Hard failure: output looks like an error message
+                            # Downgrade success to failure so recovery kicks in
+                            print(f"   [!] Step verify FAILED: {warning}")
+                            step_result = type(step_result)(
+                                success=False, output=step_result.output,
+                                error=warning, metadata=step_result.metadata
+                            )
+                        elif warning:
+                            # Soft warning (empty output, unexpected HTML, etc.)
                             print(f"   [!] Step verify warning: {warning}")
-                            # Treat as a soft failure — mark output but flag it
                             step.result = step_result.output
                             step.status = PlanStatus.COMPLETED
                             step.end_time = time.time()
@@ -667,16 +675,18 @@ Generate the plan now:
                             })
                             print(f"   [OK] Result (with warning): {str(step_result.output)[:100]}...")
                             print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
-                        else:
-                            step.result = step_result.output
-                            step.status = PlanStatus.COMPLETED
-                            step.end_time = time.time()
-                            completed_steps.add(step.step_id)
-                            step_results[step.step_id] = step_result.output
-                            results['steps'].append(self._step_to_dict(step))
-                            print(f"   [OK] Result: {str(step_result.output)[:100]}...")
-                            print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
-                    else:
+
+                    # After verification: handle clean success, or fall through to failure
+                    if step_result.success and not warning:
+                        step.result = step_result.output
+                        step.status = PlanStatus.COMPLETED
+                        step.end_time = time.time()
+                        completed_steps.add(step.step_id)
+                        step_results[step.step_id] = step_result.output
+                        results['steps'].append(self._step_to_dict(step))
+                        print(f"   [OK] Result: {str(step_result.output)[:100]}...")
+                        print(f"   Duration: {step.end_time - step.start_time:.2f}s\n")
+                    elif not step_result.success:
                         # Tool failed — try param correction retry, then LLM fallback
                         error_msg = step_result.error or str(step_result.output)
                         print(f"   [!] Tool failed: {error_msg}")

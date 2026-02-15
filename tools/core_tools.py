@@ -170,58 +170,41 @@ class WebTools:
             import re
             return [{'url': m, 'text': ''} for m in re.findall(r'href=["\']([^"\']+)', html)]
 
+    # Standard headers for web requests (prevents 403 from sites blocking bots)
+    _WEB_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+
     @staticmethod
     def fetch_text(url: str, timeout: int = 15, max_length: int = 10000) -> str:
         """Fetch a web page and return extracted readable text (HTML tags stripped). Returns text string."""
-        try:
-            import requests
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-            html = response.text
-            return WebTools.extract_text(html, max_length=max_length)
-        except ImportError:
-            return "Error: requests library not installed"
-        except Exception as e:
-            return f"Fetch error: {e}"
+        import requests
+        response = requests.get(url, timeout=timeout, headers=WebTools._WEB_HEADERS)
+        response.raise_for_status()
+        html = response.text
+        return WebTools.extract_text(html, max_length=max_length)
 
     @staticmethod
     def fetch_json(url: str, timeout: int = 15) -> Any:
         """Fetch a URL that returns JSON and parse it. Returns parsed dict/list or error dict."""
+        import requests
+        response = requests.get(url, timeout=timeout, headers=WebTools._WEB_HEADERS)
+        response.raise_for_status()
+
+        content_type = response.headers.get('content-type', '')
         try:
-            import requests
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-
-            content_type = response.headers.get('content-type', '')
-            if 'json' not in content_type and 'javascript' not in content_type:
-                # Try parsing anyway — some APIs don't set content-type correctly
-                pass
-
-            try:
-                return response.json()
-            except Exception:
-                return {
-                    'error': 'Response is not valid JSON',
-                    'content_type': content_type,
-                    'preview': response.text[:500]
-                }
-        except ImportError:
-            return {'error': 'requests library not installed'}
-        except Exception as e:
-            return {'error': f"Fetch error: {e}"}
+            return response.json()
+        except Exception:
+            raise ValueError(f"Response is not valid JSON (content-type: {content_type})")
 
     @staticmethod
     def fetch_links(url: str, timeout: int = 15) -> list:
         """Fetch a web page and return all hyperlinks found. Returns list of {url, text} dicts."""
-        try:
-            import requests
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-            return WebTools.extract_links(response.text)
-        except ImportError:
-            return [{'error': 'requests library not installed'}]
-        except Exception as e:
-            return [{'error': f"Fetch error: {e}"}]
+        import requests
+        response = requests.get(url, timeout=timeout, headers=WebTools._WEB_HEADERS)
+        response.raise_for_status()
+        return WebTools.extract_links(response.text)
 
     @staticmethod
     def download_file(url: str, save_path: str) -> str:

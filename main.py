@@ -251,7 +251,6 @@ class Raec:
         """
         # Update context awareness
         ctx = self.context.update(user_input)
-        response_hints = self.context.get_response_hints()
 
         # Track conversation
         self.conversation.add_user_message(user_input)

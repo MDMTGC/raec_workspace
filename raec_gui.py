@@ -473,6 +473,8 @@ class RaecGUI(ctk.CTk):
         self.is_executing = False
         self.command_history = []
         self.history_index = -1
+        self._core_state_cb = None
+        self._core_finding_cb = None
 
         # Build UI
         self._setup_ui()
@@ -565,8 +567,10 @@ class RaecGUI(ctk.CTk):
             interactions = self.core.identity.identity.interactions_count
             self.status_bar.set_session(session_id, interactions)
 
-        # Wire curiosity state changes into GUI
+        # Wire curiosity state changes into GUI (chain with existing core callbacks)
         if hasattr(self.core, 'idle_loop'):
+            self._core_state_cb = self.core.idle_loop.on_state_change
+            self._core_finding_cb = self.core.idle_loop.on_investigation_complete
             self.core.idle_loop.on_state_change = self._on_curiosity_state
             self.core.idle_loop.on_investigation_complete = self._on_curiosity_finding
 
@@ -585,6 +589,13 @@ class RaecGUI(ctk.CTk):
 
     def _on_curiosity_state(self, state):
         """Called from background thread when curiosity state changes"""
+        # Chain to core callback (console logging)
+        if self._core_state_cb:
+            try:
+                self._core_state_cb(state)
+            except Exception:
+                pass
+
         state_val = state.value if hasattr(state, 'value') else str(state)
         if state_val == "curious":
             self.after(0, lambda: self.orb.set_state("curious"))
@@ -597,6 +608,13 @@ class RaecGUI(ctk.CTk):
 
     def _on_curiosity_finding(self, result: dict):
         """Called from background thread when curiosity investigation completes"""
+        # Chain to core callback (console logging)
+        if self._core_finding_cb:
+            try:
+                self._core_finding_cb(result)
+            except Exception:
+                pass
+
         if result.get('success'):
             question = result.get('question', '')[:80]
             findings = result.get('findings', '')[:200]

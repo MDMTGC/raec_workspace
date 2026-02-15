@@ -57,6 +57,7 @@ class Colors:
     PROCESSING = "#FFB020"
     SUCCESS = "#00D060"
     ERROR = "#FF4060"
+    CURIOUS = "#A070FF"  # Soft purple when exploring autonomously
 
     # Borders
     BORDER_SUBTLE = "#1A1A24"
@@ -96,7 +97,7 @@ class BreathingOrb(ctk.CTkCanvas):
         self._animate()
 
     def set_state(self, state: str):
-        """Change orb state: idle, thinking, success, error"""
+        """Change orb state: idle, thinking, success, error, curious"""
         self.state = state
         if state == "idle":
             self.target_intensity = 0.3
@@ -106,6 +107,8 @@ class BreathingOrb(ctk.CTkCanvas):
             self.target_intensity = 0.6
         elif state == "error":
             self.target_intensity = 0.7
+        elif state == "curious":
+            self.target_intensity = 0.5
 
     def _get_color(self) -> str:
         """Get current color based on state"""
@@ -115,6 +118,8 @@ class BreathingOrb(ctk.CTkCanvas):
             return Colors.SUCCESS
         elif self.state == "error":
             return Colors.ERROR
+        elif self.state == "curious":
+            return Colors.CURIOUS
         return Colors.ACCENT
 
     def _animate(self):
@@ -129,6 +134,10 @@ class BreathingOrb(ctk.CTkCanvas):
             # Faster pulse when thinking
             breath = math.sin(self.phase * 3) * 0.5 + 0.5
             self.phase += 0.15
+        elif self.state == "curious":
+            # Wandering rhythm when exploring — dual sine for organic feel
+            breath = (math.sin(self.phase * 1.3) * 0.3 + math.sin(self.phase * 0.7) * 0.2) + 0.5
+            self.phase += 0.06
         else:
             # Slow, calm breathing when idle
             breath = math.sin(self.phase) * 0.5 + 0.5
@@ -556,7 +565,14 @@ class RaecGUI(ctk.CTk):
             interactions = self.core.identity.identity.interactions_count
             self.status_bar.set_session(session_id, interactions)
 
-        self.conversation.update_system_message("RAEC is ready. How can I help?")
+        # Wire curiosity state changes into GUI
+        if hasattr(self.core, 'idle_loop'):
+            self.core.idle_loop.on_state_change = self._on_curiosity_state
+            self.core.idle_loop.on_investigation_complete = self._on_curiosity_finding
+
+        # Show greeting with any pending notifications
+        greeting = self.core.get_session_greeting() if hasattr(self.core, 'get_session_greeting') else "RAEC is ready. How can I help?"
+        self.conversation.update_system_message(greeting)
         self.input_bar.set_enabled(True)
         self.input_bar.focus()
 
@@ -566,6 +582,26 @@ class RaecGUI(ctk.CTk):
         self.orb.set_state("error")
         self.status_bar.set_status(f"Error: {error}", Colors.ERROR)
         self.conversation.update_system_message(f"Failed to start: {error}")
+
+    def _on_curiosity_state(self, state):
+        """Called from background thread when curiosity state changes"""
+        state_val = state.value if hasattr(state, 'value') else str(state)
+        if state_val == "curious":
+            self.after(0, lambda: self.orb.set_state("curious"))
+            self.after(0, lambda: self.subtitle.configure(text="Exploring..."))
+            self.after(0, lambda: self.status_bar.set_status("Investigating a question...", Colors.CURIOUS))
+        elif state_val == "idle" and not self.is_executing:
+            self.after(0, lambda: self.orb.set_state("idle"))
+            self.after(0, lambda: self.subtitle.configure(text="Ready"))
+            self.after(0, lambda: self.status_bar.set_status("Ready", Colors.SUCCESS))
+
+    def _on_curiosity_finding(self, result: dict):
+        """Called from background thread when curiosity investigation completes"""
+        if result.get('success'):
+            question = result.get('question', '')[:80]
+            findings = result.get('findings', '')[:200]
+            msg = f"I looked into: {question}\nLearned: {findings}"
+            self.after(0, lambda: self.conversation.add_message("assistant", msg))
 
     def _on_submit(self, text: str, mode: str):
         """Handle user input"""

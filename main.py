@@ -35,6 +35,21 @@ from raec_core.core_rules import CoreRulesEngine
 from identity import SelfModel
 from conversation import ConversationManager, IntentClassifier, Intent
 
+# Web access (transparent, logged)
+from web import WebFetcher, WebSearch, ActivityLog
+
+# Curiosity engine (autonomous exploration)
+from curiosity import CuriosityEngine, QuestionQueue, IdleLoop
+
+# Agency systems
+from goals import GoalManager, GoalType, GoalStatus
+from preferences import PreferenceManager, PreferenceType
+from evaluation import SelfEvaluator, EvaluationType
+from toolsmith import ToolForge
+from proactive import Notifier, NotificationType
+from context import ContextManager
+from uncertainty import ConfidenceTracker
+
 
 class Raec:
     """
@@ -120,7 +135,54 @@ class Raec:
         # Intent classifier (routing)
         self.intent_classifier = IntentClassifier()
         print("   [OK] Intent classifier ready")
-        
+
+        # Web access (transparent, all activity logged)
+        self.web_activity = ActivityLog()
+        self.web_fetcher = WebFetcher(activity_log=self.web_activity)
+        self.web_searcher = WebSearch(activity_log=self.web_activity)
+        print("   [OK] Web access enabled (transparent mode)")
+
+        # Curiosity engine (autonomous exploration)
+        self.question_queue = QuestionQueue()
+        self.curiosity = CuriosityEngine(
+            question_queue=self.question_queue,
+            llm_interface=self.llm,
+            web_search=self.search_web,
+            web_fetch=self.web_fetch,
+            memory_store=self._store_curiosity_finding
+        )
+        self.idle_loop = IdleLoop(
+            curiosity_engine=self.curiosity,
+            idle_threshold=60.0,           # Start investigating after 1 min idle
+            investigation_interval=120.0,  # 2 min between investigations
+            max_investigations_per_session=5,
+            on_state_change=self._on_curiosity_state_change,
+            on_investigation_complete=self._on_investigation_complete
+        )
+        print(f"   [OK] Curiosity engine ready ({self.curiosity.get_pending_count()} pending questions)")
+
+        # Agency systems
+        self.goals = GoalManager()
+        print(f"   [OK] Goals manager ({self.goals.get_stats()['active']} active goals)")
+
+        self.preferences = PreferenceManager()
+        print(f"   [OK] Preferences ({self.preferences.get_stats()['total_preferences']} learned)")
+
+        self.self_eval = SelfEvaluator()
+        print(f"   [OK] Self-evaluator active")
+
+        self.toolsmith = ToolForge(llm_interface=self.llm)
+        print(f"   [OK] Toolsmith ready ({self.toolsmith.get_stats()['deployed']} deployed tools)")
+
+        self.notifier = Notifier()
+        print(f"   [OK] Proactive notifier ({self.notifier.get_stats()['pending']} pending)")
+
+        self.context = ContextManager()
+        print(f"   [OK] Context awareness active")
+
+        self.confidence = ConfidenceTracker()
+        print(f"   [OK] Uncertainty quantification ready")
+
         # Planner (integrates memory, skills, and tools)
         self.planner = Planner(
             self.llm,
@@ -142,6 +204,9 @@ class Raec:
         self._memory_curation_threshold = 50  # Curate after this many experiences
         self._last_curation_count = 0
         self._curation_errors = []  # Track non-critical errors for later review
+
+        # Start the curiosity loop (autonomous exploration)
+        self.idle_loop.start()
 
         print("\n" + "="*70)
         print("[OK] RAEC SYSTEM ONLINE")
@@ -184,15 +249,27 @@ class Raec:
         Returns:
             Result string
         """
+        # Update context awareness
+        ctx = self.context.update(user_input)
+        response_hints = self.context.get_response_hints()
+
         # Track conversation
         self.conversation.add_user_message(user_input)
         self.identity.record_interaction()
+
+        # Learn preferences from explicit statements
+        if any(phrase in user_input.lower() for phrase in ['i prefer', 'i like', 'always ', 'never ', "don't "]):
+            pref = self.preferences.learn_from_explicit(user_input, self.llm)
+            if pref:
+                print(f"   [+] Learned preference: {pref.name}")
 
         # Classify intent
         classification = self.intent_classifier.classify(user_input)
         intent = classification.intent
 
         print(f"\n[?] Intent: {intent.value} (confidence: {classification.confidence:.0%})")
+        if ctx.user_state.urgency.value > 2:
+            print(f"   [!] Urgency detected: {ctx.user_state.urgency.name}")
 
         # Route based on intent
         if intent == Intent.CHAT:
@@ -203,6 +280,23 @@ class Raec:
             response = self._handle_meta(user_input)
         else:  # Intent.TASK
             response = self._handle_task(user_input, mode if mode != "auto" else "standard")
+
+        # Assess confidence in response
+        confidence = self.confidence.assess_confidence(response, task_type=intent.value)
+        if self.confidence.should_express_uncertainty(confidence):
+            print(f"   [~] Low confidence: {confidence.score:.0%}")
+
+        # Analyze response for curiosity triggers (uncertainty, knowledge gaps)
+        questions_added = self.curiosity.analyze_response(
+            response=response,
+            user_input=user_input,
+            session_id=self.conversation.current_session.session_id
+        )
+        if questions_added:
+            print(f"   [?] Added {len(questions_added)} questions to investigate")
+
+        # Record user activity (resets idle timer)
+        self.idle_loop.record_user_activity()
 
         # Track response
         self.conversation.add_assistant_message(response)
@@ -222,7 +316,20 @@ class Raec:
             for m in recent_messages[:-1]  # Exclude current message
         ])
 
+        # Get applicable preferences
+        pref_context = self.preferences.build_preference_prompt("chat")
+
+        # Get context hints
+        hints = self.context.get_response_hints()
+        style_hint = ""
+        if hints.get("verbosity") == "minimal":
+            style_hint = "Keep response very brief."
+        elif hints.get("mood_aware") and hints.get("formality") == "empathetic":
+            style_hint = "The user may be frustrated. Be understanding."
+
         prompt = f"""{identity_context}
+
+{pref_context}
 
 Recent conversation:
 {conv_context}
@@ -230,6 +337,7 @@ Recent conversation:
 User: {user_input}
 
 Respond naturally and briefly as RAEC. Be conversational but concise.
+{style_hint}
 """
         return self.llm.generate(prompt, temperature=0.7, max_tokens=256)
 
@@ -270,6 +378,26 @@ Provide a helpful, accurate answer. Be direct and concise.
             return self._get_status_text()
         elif '/skills' in input_lower:
             return self._get_skills_text()
+        elif '/curiosity' in input_lower:
+            return self._get_curiosity_text()
+        elif '/learned' in input_lower or 'what did you learn' in input_lower:
+            return self.what_did_you_learn()
+        elif '/questions' in input_lower or 'what are you wondering' in input_lower:
+            return self.get_pending_questions()
+        elif '/web' in input_lower or 'web activity' in input_lower:
+            return self.get_web_activity()
+        elif '/goals' in input_lower:
+            return self.goals.format_active_goals()
+        elif '/preferences' in input_lower or '/prefs' in input_lower:
+            return self.preferences.format_preferences()
+        elif '/performance' in input_lower or '/eval' in input_lower:
+            return self.self_eval.format_performance_report()
+        elif '/tools' in input_lower or '/toolsmith' in input_lower:
+            return self.toolsmith.format_tools()
+        elif '/notifications' in input_lower or '/notify' in input_lower:
+            return self.notifier.format_pending()
+        elif '/confidence' in input_lower or '/calibration' in input_lower:
+            return self.confidence.format_calibration_report()
         elif 'who are you' in input_lower or 'what are you' in input_lower:
             return self._get_identity_text()
         elif 'what can you do' in input_lower:
@@ -323,9 +451,19 @@ Start with "Done:" or "Completed:". Do NOT give instructions - the task is finis
         return """RAEC - Reflective Agentic Ecosystem Composer
 
 Commands:
-  /help     - Show this help
-  /status   - System status
-  /skills   - List learned skills
+  /help         - Show this help
+  /status       - System status
+  /skills       - List learned skills
+  /curiosity    - Curiosity engine status
+  /learned      - What I learned autonomously
+  /questions    - What I'm wondering about
+  /web          - Recent web activity
+  /goals        - Active goals I'm pursuing
+  /preferences  - Learned preferences
+  /performance  - Self-evaluation report
+  /tools        - Generated tools
+  /notifications- Pending notifications
+  /confidence   - Calibration report
 
 Modes:
   standard      - Normal planning and execution
@@ -339,14 +477,26 @@ Just tell me what you need - I'll figure out how to help."""
         skill_stats = self.skills.get_stats()
         memory_count = len(self.memory.get_recent_by_type(MemoryType.EXPERIENCE, limit=1000))
         session_msgs = self.conversation.message_count()
+        curiosity_stats = self.get_curiosity_stats()
+        goal_stats = self.goals.get_stats()
+        pref_stats = self.preferences.get_stats()
+        eval_stats = self.self_eval.get_stats()
 
         return f"""RAEC Status:
   Session: {self.conversation.current_session.session_id}
   Messages this session: {session_msgs}
   Trust level: {self.identity.identity.trust_level}
   Total interactions: {self.identity.identity.interactions_count}
+
+Knowledge:
   Skills: {skill_stats['total_skills']} ({skill_stats['verified_count']} verified)
-  Experiences: {memory_count}"""
+  Experiences: {memory_count}
+  Preferences: {pref_stats['total_preferences']} learned
+
+Agency:
+  Goals: {goal_stats['active']} active ({goal_stats['completed']} completed)
+  Curiosity: {curiosity_stats['idle_loop']['state']} ({curiosity_stats['questions']['unresolved']} pending)
+  Performance: {eval_stats['success_rate']:.0%} success rate ({eval_stats['trend']})"""
 
     def _get_skills_text(self) -> str:
         """Return skills summary"""
@@ -378,11 +528,197 @@ I'm designed to be a persistent, evolving AI assistant that learns from our inte
 • Code execution - run Python scripts, shell commands
 • Planning - break down complex tasks into steps
 • Learning - remember patterns and improve over time
-• Web requests - fetch data, interact with APIs
+• Web search - find current information online
+• URL fetching - read and extract content from web pages
 • Data processing - parse, transform, analyze data
 
 Just describe what you need and I'll plan the approach."""
-    
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # WEB ACCESS - Transparent internet capabilities
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def web_fetch(self, url: str, reason: str, autonomous: bool = False) -> dict:
+        """Fetch content from a URL with full transparency."""
+        triggered_by = "autonomous" if autonomous else "user"
+        result = self.web_fetcher.fetch(url, reason, triggered_by)
+
+        if result.success and autonomous:
+            self.memory.store(
+                content=f"Fetched {url}: {result.title or 'No title'}",
+                memory_type=MemoryType.EXPERIENCE,
+                metadata={'url': url, 'reason': reason, 'autonomous': True},
+                source='web_fetch'
+            )
+
+        return {
+            'success': result.success, 'url': result.url, 'title': result.title,
+            'content': result.content, 'links': result.links, 'error': result.error
+        }
+
+    def search_web(self, query: str, reason: str, autonomous: bool = False) -> dict:
+        """Search the web with full transparency."""
+        triggered_by = "autonomous" if autonomous else "user"
+        results = self.web_searcher.search(query, reason, triggered_by)
+
+        if results.success and autonomous:
+            self.memory.store(
+                content=f"Searched for '{query}': {len(results.results)} results",
+                memory_type=MemoryType.EXPERIENCE,
+                metadata={'query': query, 'reason': reason, 'autonomous': True},
+                source='web_search'
+            )
+
+        return {
+            'success': results.success, 'query': results.query,
+            'results': [{'title': r.title, 'url': r.url, 'snippet': r.snippet} for r in results.results],
+            'error': results.error
+        }
+
+    def get_web_activity(self, limit: int = 20) -> str:
+        """Get formatted web activity log for transparency."""
+        return self.web_activity.format_recent(limit)
+
+    def get_web_stats(self) -> dict:
+        """Get web activity statistics."""
+        return self.web_activity.get_stats()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CURIOSITY - Autonomous exploration and learning
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _store_curiosity_finding(self, content: str, context: dict):
+        """Store a curiosity finding in memory"""
+        self.memory.store(
+            content=content,
+            memory_type=MemoryType.EXPERIENCE,
+            metadata=context,
+            source='curiosity'
+        )
+
+    def _on_curiosity_state_change(self, state):
+        """Called when curiosity state changes (for GUI integration)"""
+        print(f"   [~] Curiosity: {state.value}")
+
+    def _on_investigation_complete(self, result: dict):
+        """Called when an investigation completes"""
+        if result.get('success'):
+            print(f"   [!] Learned: {result.get('findings', '')[:100]}...")
+
+    def start_curiosity(self):
+        """Start the background curiosity loop"""
+        self.idle_loop.start()
+        print("   [OK] Curiosity loop started")
+
+    def stop_curiosity(self):
+        """Stop the background curiosity loop"""
+        self.idle_loop.stop()
+        print("   [OK] Curiosity loop stopped")
+
+    def pause_curiosity(self):
+        """Temporarily pause curiosity"""
+        self.idle_loop.pause()
+
+    def resume_curiosity(self):
+        """Resume curiosity"""
+        self.idle_loop.resume()
+
+    def get_curiosity_stats(self) -> dict:
+        """Get curiosity statistics"""
+        return {
+            "idle_loop": self.idle_loop.get_stats(),
+            "questions": self.curiosity.get_stats()
+        }
+
+    def what_did_you_learn(self) -> str:
+        """Get summary of what RAEC learned autonomously"""
+        return self.curiosity.format_what_i_learned()
+
+    def get_pending_questions(self) -> str:
+        """Get formatted list of pending questions"""
+        return self.question_queue.format_pending()
+
+    def add_question(self, question: str, context: str = "User suggested"):
+        """Manually add a question for RAEC to investigate"""
+        from curiosity.questions import QuestionType, QuestionPriority
+        self.question_queue.add(
+            question=question,
+            question_type=QuestionType.USER_INTEREST,
+            context=context,
+            priority=QuestionPriority.HIGH,
+            source_conversation=self.conversation.current_session.session_id
+        )
+
+    def _get_curiosity_text(self) -> str:
+        """Return curiosity engine status"""
+        stats = self.get_curiosity_stats()
+        idle_stats = stats['idle_loop']
+        q_stats = stats['questions']
+
+        status_lines = [
+            "Curiosity Engine:",
+            f"  State: {idle_stats['state']}",
+            f"  Pending questions: {q_stats['unresolved']}",
+            f"  Resolved: {q_stats['resolved']}",
+            f"  Investigations this session: {idle_stats['investigations_this_session']}/{idle_stats['max_investigations']}",
+            f"  Idle threshold: {idle_stats['idle_threshold']}s",
+        ]
+
+        if q_stats.get('by_type'):
+            status_lines.append("  Questions by type:")
+            for qtype, count in q_stats['by_type'].items():
+                status_lines.append(f"    {qtype}: {count}")
+
+        return "\n".join(status_lines)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # AGENCY - Goals, preferences, self-evaluation, tool creation
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def add_goal(self, name: str, description: str, goal_type: str = "user_given", priority: str = "medium"):
+        """Add a goal for RAEC to pursue"""
+        from goals.goal_manager import GoalPriority
+        gt = GoalType[goal_type.upper()] if goal_type.upper() in GoalType.__members__ else GoalType.USER_GIVEN
+        gp = GoalPriority[priority.upper()] if priority.upper() in GoalPriority.__members__ else GoalPriority.MEDIUM
+        return self.goals.create_goal(name=name, description=description, goal_type=gt, priority=gp, source="user")
+
+    def update_goal_progress(self, goal_id: int, delta: float, description: str):
+        """Update progress on a goal"""
+        return self.goals.update_progress(goal_id, delta, description)
+
+    def get_active_goals(self) -> list:
+        """Get active goals"""
+        return self.goals.get_active_goals()
+
+    def create_tool(self, name: str, description: str, purpose: str, inputs: dict, output: str):
+        """Create a new tool for RAEC to use"""
+        from toolsmith.tool_forge import ToolSpec
+        spec = ToolSpec(
+            name=name, description=description, purpose=purpose,
+            inputs=inputs, output=output, examples=[], constraints=["Be safe", "Validate inputs"]
+        )
+        tool = self.toolsmith.generate_tool(spec, created_by="user")
+        if self.toolsmith.test_tool(tool.id):
+            self.toolsmith.deploy_tool(tool.id)
+            return f"Tool '{name}' created and deployed successfully"
+        return f"Tool '{name}' created but failed testing"
+
+    def use_generated_tool(self, name: str, **kwargs):
+        """Use a generated tool"""
+        return self.toolsmith.use_tool(name, **kwargs)
+
+    def record_task_outcome(self, task: str, succeeded: bool, confidence: float = 0.5):
+        """Record outcome of a task for self-evaluation"""
+        from evaluation.self_evaluator import OutcomeRating
+        self.self_eval.record_task_outcome(task=task, confidence=confidence, succeeded=succeeded)
+
+    def get_session_greeting(self) -> str:
+        """Get greeting with pending notifications"""
+        greeting = self.notifier.format_session_greeting()
+        if greeting:
+            return f"Welcome back. {greeting}"
+        return "Welcome back."
+
     def execute_task(
         self,
         task: str,
@@ -936,6 +1272,29 @@ If nothing notable, respond with "No significant insight."
 
     def close(self):
         """Clean shutdown with state persistence"""
+        print("\n" + "="*70)
+        print("[*] RAEC SHUTTING DOWN")
+        print("="*70)
+
+        # Stop curiosity loop
+        if self.idle_loop.state.value != "stopped":
+            self.stop_curiosity()
+
+            # Show what was learned this session
+            findings = self.idle_loop.get_session_findings()
+            if findings:
+                print(f"\n[~] Curiosity session: investigated {len(findings)} questions")
+
+        # Expire old notifications
+        expired = self.notifier.expire_old()
+        if expired:
+            print(f"   [~] Expired {expired} old notifications")
+
+        # Record session performance
+        eval_stats = self.self_eval.get_stats()
+        if eval_stats['total_evaluations'] > 0:
+            print(f"   [~] Session performance: {eval_stats['success_rate']:.0%} success rate")
+
         # Run final reflection
         insight = self.reflect(trigger="session_end")
         if insight:
@@ -946,6 +1305,9 @@ If nothing notable, respond with "No significant insight."
             summary=self.conversation.get_conversation_summary(),
             outcomes=self.conversation.current_session.outcomes if self.conversation.current_session else []
         )
+
+        # Reset context for next session
+        self.context.reset_session()
 
         # Save all state
         self.identity.save()

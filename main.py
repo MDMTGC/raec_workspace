@@ -335,7 +335,7 @@ Recent conversation:
 
 User: {user_input}
 
-Respond naturally and briefly as RAEC. Be conversational but concise.
+Reply in first person ("I", "my"). Be conversational, concise, and direct. No narration, no third-person.
 {style_hint}
 """
         return self.llm.generate(prompt, temperature=0.7, max_tokens=256)
@@ -357,7 +357,7 @@ Respond naturally and briefly as RAEC. Be conversational but concise.
 
 Question: {user_input}
 
-Provide a helpful, accurate answer. Be direct and concise.
+Answer in first person ("I", "my"). Be direct and concise. No narration or third-person.
 """
         response = self.llm.generate(prompt, temperature=0.5, max_tokens=512)
 
@@ -406,9 +406,9 @@ Provide a helpful, accurate answer. Be direct and concise.
             identity_context = self.identity.get_system_prompt_context()
             prompt = f"""{identity_context}
 
-The user is asking about RAEC itself: {user_input}
+The user is asking about me: {user_input}
 
-Respond helpfully about your capabilities, identity, or status as appropriate.
+Answer in first person about my capabilities, identity, or status. Be direct. No third-person narration.
 """
             return self.llm.generate(prompt, temperature=0.5, max_tokens=256)
 
@@ -439,8 +439,7 @@ Status: COMPLETED SUCCESSFULLY
 Steps executed:
 {step_summary}
 
-Provide a SHORT confirmation (1-2 sentences) of what was accomplished.
-Start with "Done:" or "Completed:". Do NOT give instructions - the task is finished.
+Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" or "Completed:". No narration.
 """
 
         return self.llm.generate(synthesis_prompt, temperature=0.5, max_tokens=256)

@@ -255,7 +255,7 @@ planner:
 
 - Git repo with worktree workflow (no push auth — HTTPS only, no token/SSH)
 - Worktree at `.claude/worktrees/vigorous-fermi`, merge to main from desktop dir
-- `raec:latest` in Ollama = DeepSeek R1 32B Q4_K_M with custom system prompt
+- `raec:latest` in Ollama = DeepSeek R1 32B Q4_K_M with NO system prompt (R1 best practice — context injected into user message via `identity/self_model.py`)
 - All agency module databases in `data/` (SQLite): curiosity.db, goals.db, preferences.db, etc.
 - `requirements.txt`: torch, transformers, sentence-transformers, faiss-cpu, requests, beautifulsoup4, selenium, pyyaml
 
@@ -267,3 +267,4 @@ planner:
 - **2026-02-14:** Phase 3 complete (failure→belief, semantic verification, multi-agent planner, learning hooks, step-level skills)
 - **2026-02-15:** DeepSeek 32B orchestrator upgrade, curiosity engine + 8 agency modules integrated, GUI wired with curious orb state
 - **2026-02-15:** Audit fixes (callback chaining, dead code), User-Agent fix for web tools, scaffolding fix (error-as-value escalation to hard failure)
+- **2026-02-15:** Removed Modelfile SYSTEM prompt (DeepSeek R1 best practice: no system prompt, context via user-message injection)

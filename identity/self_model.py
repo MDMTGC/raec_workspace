@@ -224,7 +224,13 @@ class SelfModel:
             self._dirty = True
 
     def get_system_prompt_context(self) -> str:
-        """Generate identity context for system prompts"""
+        """
+        Generate identity/capabilities context for user-message injection.
+
+        DeepSeek R1 works best with NO system prompt. Instead, this context
+        is prepended to each user turn in main.py's prompt construction.
+        The method name is kept for backward compatibility.
+        """
         parts = [
             f"You are {self.identity.name} (Reflective Agentic Ecosystem Composer), an autonomous AI system that ACTS — you plan, use tools, fetch web data, and execute tasks directly.",
             f"Personality: {', '.join(self.identity.traits)}.",

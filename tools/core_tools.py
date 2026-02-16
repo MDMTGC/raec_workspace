@@ -207,6 +207,46 @@ class WebTools:
         return WebTools.extract_links(response.text)
 
     @staticmethod
+    def search(query: str, max_results: int = 5) -> str:
+        """Search the web using DuckDuckGo. Returns formatted search results with titles, URLs, and snippets. Use this FIRST when you need to find information — don't guess URLs."""
+        import requests
+        import urllib.parse
+        from bs4 import BeautifulSoup
+        import re
+
+        encoded_query = urllib.parse.quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+
+        response = requests.get(url, timeout=10, headers=WebTools._WEB_HEADERS)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+
+        for result_div in soup.select('.result')[:max_results]:
+            try:
+                title_elem = result_div.select_one('.result__title a')
+                if not title_elem:
+                    continue
+                title = title_elem.get_text(strip=True)
+                href = title_elem.get('href', '')
+                if 'uddg=' in href:
+                    url_match = re.search(r'uddg=([^&]+)', href)
+                    actual_url = urllib.parse.unquote(url_match.group(1)) if url_match else href
+                else:
+                    actual_url = href
+                snippet_elem = result_div.select_one('.result__snippet')
+                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+                results.append(f"{title}\n  {actual_url}\n  {snippet}")
+            except Exception:
+                continue
+
+        if not results:
+            raise RuntimeError(f"No search results found for: {query}")
+
+        return f"Search results for: {query}\n\n" + "\n\n".join(results)
+
+    @staticmethod
     def download_file(url: str, save_path: str) -> str:
         """Download file from URL"""
         try:

@@ -921,13 +921,22 @@ Generate the plan now:
         looks problematic, or None if it looks OK. Does NOT use the LLM.
         """
         if output is None:
-            return "Output is None"
+            return "Output is None — contains error"
 
         output_str = str(output)
 
-        # Check for empty output
+        # Check for empty output (string, list, dict)
         if not output_str.strip():
-            return "Output is empty"
+            return "Output is empty — contains error"
+
+        # Empty collections are failures, not soft warnings
+        if output == [] or output == {} or output == "[]" or output == "{}":
+            return "Output is empty collection — contains error"
+
+        # Very short output from web fetches is suspicious (e.g. just "Sign in")
+        web_tools = {'web.fetch_text', 'web.fetch_json', 'web.fetch_links'}
+        if tool_key in web_tools and isinstance(output, str) and len(output.strip()) < 50:
+            return f"Output too short for web fetch ({len(output.strip())} chars) — contains error"
 
         # Check for error strings in output (tool returned an error as a value)
         error_prefixes = [

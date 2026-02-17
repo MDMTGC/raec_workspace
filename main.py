@@ -332,19 +332,15 @@ class Raec:
         if self.confidence.should_express_uncertainty(confidence):
             print(f"   [~] Low confidence: {confidence.score:.0%}")
 
-        # Analyze response for curiosity triggers (uncertainty, knowledge gaps)
         questions_added = self.curiosity.analyze_response(
             response=response,
             user_input=user_input,
-            session_id=self.conversation.current_session.session_id
+            session_id=self.conversation.current_session.session_id,
         )
         if questions_added:
             print(f"   [?] Added {len(questions_added)} questions to investigate")
 
-        # Record user activity (resets idle timer)
         self.idle_loop.record_user_activity()
-
-        # Track response
         self.conversation.add_assistant_message(response)
         self._persist_runtime_state(reason="turn_complete")
 

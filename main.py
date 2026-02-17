@@ -573,7 +573,6 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
             "outcomes": list(self.conversation.current_session.outcomes),
             "memory_context": self._last_memory_context,
             "recent_turns": self.conversation.get_context_messages(limit=limit),
-            "conversation_state": self.conversation_state.state.to_dict(),
             "captured_at": time.time(),
         }
 

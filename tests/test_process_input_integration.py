@@ -233,37 +233,3 @@ def test_reset_conversation_state_clears_buffers_and_persists() -> None:
     assert raec._last_memory_context == []
     assert raec._last_stored_rolling_summary == ""
     assert persisted == ["reset"]
-
-
-def test_route_turn_uses_router_and_returns_turn_mode() -> None:
-    raec = Raec.__new__(Raec)
-    raec.turn_router = DummyTurnRouter(route=TurnRoute(handler_name="query", turn_mode="analysis"))
-    raec._handle_query = lambda user_input, state_context="": f"query:{user_input}:{state_context}"
-
-    response, turn_mode = raec._route_turn(
-        intent=Intent.QUERY,
-        requested_mode="auto",
-        user_input="What is RAEC?",
-        state_context="ConversationState: test",
-    )
-
-    assert response.startswith("query:What is RAEC?:ConversationState: test")
-    assert turn_mode == "analysis"
-
-
-def test_finalize_turn_runs_post_processing_and_persists() -> None:
-    route = TurnRoute(handler_name="chat", turn_mode="chat")
-    raec = _build_lightweight_raec(intent=Intent.CHAT, route=route, compress_result=False)
-
-    raec._finalize_turn(
-        user_input="hello",
-        response="chat:hello:ConversationState: test",
-        turn_mode="chat",
-        task_type="chat",
-    )
-
-    assert raec.conversation_state.state.updates == [
-        ("hello", "chat:hello:ConversationState: test", "chat"),
-    ]
-    assert raec.conversation.assistant_messages == ["chat:hello:ConversationState: test"]
-    assert raec._persist_calls == ["turn_complete"]

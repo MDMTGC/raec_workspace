@@ -80,10 +80,10 @@ class ConversationState:
             self.last_commitments.append(assistant_output.strip()[:200])
             self.last_commitments = self.last_commitments[-5:]
 
-    def compress_history(self, max_recent_turns: int = 6) -> bool:
+    def compress_history(self, max_recent_turns: int = 6) -> None:
         """Compress older turns into a deterministic rolling summary."""
         if len(self.recent_turns) <= max_recent_turns:
-            return False
+            return
 
         overflow = self.recent_turns[:-max_recent_turns]
         self.recent_turns = self.recent_turns[-max_recent_turns:]
@@ -94,7 +94,6 @@ class ConversationState:
         ]
         prefix = f"{self.rolling_summary}\n" if self.rolling_summary else ""
         self.rolling_summary = (prefix + "\n".join(compressed_lines)).strip()
-        return True
 
     def generate_prompt_context(self) -> str:
         """Build deterministic prompt context payload from current state."""

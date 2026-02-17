@@ -1449,8 +1449,7 @@ If nothing notable, respond with "No significant insight."
         self.context.reset_session()
 
         # Save all state
-        self.identity.save()
-        self.conversation.save()
+        self._persist_runtime_state(reason="shutdown")
         self.memory.close()
 
         print("\n[OK] Raec system shutdown complete (state saved)")

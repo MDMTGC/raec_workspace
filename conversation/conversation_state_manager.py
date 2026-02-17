@@ -98,23 +98,7 @@ class ConversationState:
     def generate_prompt_context(self) -> str:
         """Build deterministic prompt context payload from current state."""
         recent = "\n".join(
-            [f"- U: {turn.user[:120]}\n  A: {turn.assistant[:120]}" for turn in self.recent_turns[-3:]]
-        )
-        unresolved = ", ".join(self.unresolved_references) if self.unresolved_references else "none"
-        commitments = "\n".join([f"- {c}" for c in self.last_commitments[-3:]]) or "- none"
-
-        return (
-            "ConversationState:\n"
-            f"- session_id: {self.session_id}\n"
-            f"- active_thread_id: {self.active_thread_id}\n"
-            f"- mode: {self.mode}\n"
-            f"- active_task: {self.active_task or 'none'}\n"
-            f"- unresolved_references: {unresolved}\n"
-            "- last_commitments:\n"
-            f"{commitments}\n"
-            f"- rolling_summary: {self.rolling_summary or 'none'}\n"
-            "- recent_turns:\n"
-            f"{recent or '- none'}"
+            [f"- U: {turn.user[:120]}\n  A: {turn.assistant[:120]}" for turn in self.recent_turns]
         )
 
     def to_dict(self) -> Dict[str, Any]:

@@ -56,7 +56,6 @@ from proactive import Notifier, NotificationType
 from context import ContextManager
 from uncertainty import ConfidenceTracker
 from observability import PromptDebugLogger
-from runtime import SessionPersistenceCoordinator
 
 
 class Raec:
@@ -217,8 +216,6 @@ class Raec:
         )
         self.snapshot_dir = os.path.join(base_dir, observability_config.get('session_snapshot_dir', 'logs/session_snapshots'))
         self._last_memory_context: List[Dict[str, Any]] = []
-        self._last_stored_rolling_summary = ""
-        self.persistence = SessionPersistenceCoordinator()
         
         # System directive
         self.logic_directive = "You are a technical reasoning engine. Provide objective analysis."
@@ -319,9 +316,7 @@ class Raec:
             assistant_output=response,
             mode=turn_mode,
         )
-        compressed = self.conversation_state.state.compress_history(max_recent_turns=6)
-        if compressed:
-            self._store_conversation_summary()
+        self.conversation_state.state.compress_history(max_recent_turns=6)
 
         # Assess confidence in response
         confidence = self.confidence.assess_confidence(response, task_type=intent.value)
@@ -342,7 +337,9 @@ class Raec:
 
         # Track response
         self.conversation.add_assistant_message(response)
-        self._persist_runtime_state(reason="turn_complete")
+        self.conversation.save()
+        self.conversation_state.save()
+        self.identity.save()
 
         return response
 
@@ -578,7 +575,6 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
             "outcomes": list(self.conversation.current_session.outcomes),
             "memory_context": self._last_memory_context,
             "recent_turns": self.conversation.get_context_messages(limit=limit),
-            "conversation_state": self.conversation_state.state.to_dict(),
             "captured_at": time.time(),
         }
 
@@ -586,46 +582,6 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
             json.dump(snapshot, f, indent=2)
 
         return output_path
-
-
-    def _persist_runtime_state(self, reason: str) -> None:
-        """Persist conversation/identity state in deterministic order."""
-        result = self.persistence.persist(
-            conversation=self.conversation,
-            conversation_state=self.conversation_state,
-            identity=self.identity,
-        )
-        if not result.ok:
-            print(f"   [!] Persistence warning ({reason}): {result.failures}")
-
-    def _store_conversation_summary(self) -> None:
-        """Store rolling conversation summary in memory when it changes."""
-        summary = self.conversation_state.state.rolling_summary.strip()
-        if not summary or summary == self._last_stored_rolling_summary:
-            return
-
-        self.memory.store(
-            content=summary[-2000:],
-            memory_type=MemoryType.SUMMARY,
-            metadata={
-                "session_id": self.conversation.current_session.session_id,
-                "thread_id": self.conversation_state.state.active_thread_id,
-                "mode": self.conversation_state.state.mode,
-            },
-            source="conversation_state",
-        )
-        self._last_stored_rolling_summary = summary
-
-    def _reset_conversation_state(self) -> str:
-        """Reset session conversation context and state manager thread state."""
-        self.conversation.clear_history()
-        self.conversation_state.state.reset(keep_rolling_summary=False)
-        self._last_memory_context = []
-        self._last_stored_rolling_summary = ""
-        self.persistence = SessionPersistenceCoordinator()
-        self.conversation.save()
-        self.conversation_state.save()
-        return "Conversation context reset for this session."
 
     def _get_help_text(self) -> str:
         """Return help text"""

@@ -301,42 +301,23 @@ class Raec:
 
         state_context = self.conversation_state.state.generate_prompt_context()
 
-        response, turn_mode = self._route_turn(
-            intent=intent,
-            requested_mode=mode,
-            user_input=user_input,
-            state_context=state_context,
-        )
-
-        self._finalize_turn(
-            user_input=user_input,
-            response=response,
-            turn_mode=turn_mode,
-            task_type=intent.value,
-        )
-
-        return response
-
-
-    def _route_turn(self, intent: Intent, requested_mode: str, user_input: str, state_context: str) -> tuple[str, str]:
-        """Route turn to the correct handler and return response + turn mode."""
-        route = self.turn_router.route(intent=intent, requested_mode=requested_mode)
+        # Route based on intent
+        route = self.turn_router.route(intent=intent, requested_mode=mode)
         if route.handler_name == "chat":
-            return self._handle_chat(user_input, state_context=state_context), route.turn_mode
-        if route.handler_name == "query":
-            return self._handle_query(user_input, state_context=state_context), route.turn_mode
-        if route.handler_name == "meta":
-            return self._handle_meta(user_input, state_context=state_context), route.turn_mode
+            response = self._handle_chat(user_input, state_context=state_context)
+        elif route.handler_name == "query":
+            response = self._handle_query(user_input, state_context=state_context)
+        elif route.handler_name == "meta":
+            response = self._handle_meta(user_input, state_context=state_context)
+        else:
+            response = self._handle_task(
+                user_input,
+                route.selected_mode or "standard",
+                state_context=state_context,
+            )
 
-        response = self._handle_task(
-            user_input,
-            route.selected_mode or "standard",
-            state_context=state_context,
-        )
-        return response, route.turn_mode
+        turn_mode = route.turn_mode
 
-    def _finalize_turn(self, user_input: str, response: str, turn_mode: str, task_type: str) -> None:
-        """Apply continuity, confidence, curiosity, and persistence side effects."""
         self.conversation_state.state.update_from_turn(
             user_input=user_input,
             assistant_output=response,
@@ -346,7 +327,8 @@ class Raec:
         if compressed:
             self._store_conversation_summary()
 
-        confidence = self.confidence.assess_confidence(response, task_type=task_type)
+        # Assess confidence in response
+        confidence = self.confidence.assess_confidence(response, task_type=intent.value)
         if self.confidence.should_express_uncertainty(confidence):
             print(f"   [~] Low confidence: {confidence.score:.0%}")
 
@@ -361,6 +343,8 @@ class Raec:
         self.idle_loop.record_user_activity()
         self.conversation.add_assistant_message(response)
         self._persist_runtime_state(reason="turn_complete")
+
+        return response
 
     def _handle_chat(self, user_input: str, state_context: str = "") -> str:
         """Handle casual conversation"""
@@ -580,10 +564,15 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
             task_type=task_type,
         )
 
-    def _build_session_snapshot_payload(self, limit: int = 10) -> Dict[str, Any]:
-        """Build deterministic session snapshot payload."""
-        return {
-            "session_id": self.conversation.current_session.session_id,
+    def _create_session_snapshot(self, limit: int = 10) -> str:
+        """Dump current session state, memory context, and recent turns to disk."""
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+        timestamp_ms = int(time.time() * 1000)
+        session_id = self.conversation.current_session.session_id
+        output_path = os.path.join(self.snapshot_dir, f"snapshot_{session_id}_{timestamp_ms}.json")
+
+        snapshot = {
+            "session_id": session_id,
             "message_count": self.conversation.message_count(),
             "active_topics": list(self.conversation.current_session.key_topics),
             "outcomes": list(self.conversation.current_session.outcomes),
@@ -593,15 +582,6 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
             "last_persistence_status": self._last_persistence_status,
             "captured_at": time.time(),
         }
-
-    def _create_session_snapshot(self, limit: int = 10) -> str:
-        """Dump current session state, memory context, and recent turns to disk."""
-        os.makedirs(self.snapshot_dir, exist_ok=True)
-        timestamp_ms = int(time.time() * 1000)
-        session_id = self.conversation.current_session.session_id
-        output_path = os.path.join(self.snapshot_dir, f"snapshot_{session_id}_{timestamp_ms}.json")
-
-        snapshot = self._build_session_snapshot_payload(limit=limit)
 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2)

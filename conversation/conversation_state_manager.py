@@ -63,38 +63,27 @@ class ConversationState:
 
     def update_from_turn(self, user_input: str, assistant_output: str, mode: str) -> None:
         """Update continuity state from a completed turn."""
-        normalized_user_input = user_input.strip()
-
         self.last_updated = time.time()
         self.mode = mode
-        self.recent_turns.append(Turn(user=normalized_user_input, assistant=assistant_output))
+        self.recent_turns.append(Turn(user=user_input, assistant=assistant_output))
 
-        # Task continuity: explicit task mode always refreshes active task.
-        # Non-task turns only refresh task when action intent is clearly present.
-        if mode == "task":
-            self.active_task = normalized_user_input
-        elif TASK_SIGNAL_PATTERN.search(normalized_user_input) and not REFERENCE_PATTERN.search(normalized_user_input):
-            self.active_task = normalized_user_input
+        if mode == "task" or TASK_SIGNAL_PATTERN.search(user_input):
+            self.active_task = user_input.strip()
 
-        references = REFERENCE_PATTERN.findall(normalized_user_input)
-        if references:
-            if self.active_task:
-                # References can be resolved against active task context.
-                self.unresolved_references = []
-            else:
-                self.unresolved_references = sorted({r.lower() for r in references})
-        elif self.unresolved_references:
-            # Clear stale unresolved markers once a non-reference turn appears.
+        references = REFERENCE_PATTERN.findall(user_input)
+        if references and not self.active_task:
+            self.unresolved_references = sorted({r.lower() for r in references})
+        elif references and self.active_task:
             self.unresolved_references = []
 
         if COMMITMENT_PATTERN.search(assistant_output):
             self.last_commitments.append(assistant_output.strip()[:200])
             self.last_commitments = self.last_commitments[-5:]
 
-    def compress_history(self, max_recent_turns: int = 6) -> bool:
+    def compress_history(self, max_recent_turns: int = 6) -> None:
         """Compress older turns into a deterministic rolling summary."""
         if len(self.recent_turns) <= max_recent_turns:
-            return False
+            return
 
         overflow = self.recent_turns[:-max_recent_turns]
         self.recent_turns = self.recent_turns[-max_recent_turns:]
@@ -105,7 +94,6 @@ class ConversationState:
         ]
         prefix = f"{self.rolling_summary}\n" if self.rolling_summary else ""
         self.rolling_summary = (prefix + "\n".join(compressed_lines)).strip()
-        return True
 
     def generate_prompt_context(self) -> str:
         """Build deterministic prompt context payload from current state."""

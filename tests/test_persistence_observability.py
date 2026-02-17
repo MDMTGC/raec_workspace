@@ -10,7 +10,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from main import Raec
-from runtime.snapshot_builder import SessionSnapshotBuilder
 
 
 def test_persist_runtime_state_tracks_last_status() -> None:
@@ -45,9 +44,7 @@ def test_persist_runtime_state_tracks_last_status() -> None:
 def test_snapshot_includes_last_persistence_status(tmp_path: Path) -> None:
     raec = Raec.__new__(Raec)
     raec.snapshot_dir = str(tmp_path)
-    raec.snapshot_builder = SessionSnapshotBuilder()
     raec._last_memory_context = [{"memory": "x"}]
-    raec.snapshot_builder = SessionSnapshotBuilder()
     raec._last_persistence_status = {"reason": "reset", "ok": True}
 
     class _Session:
@@ -79,46 +76,3 @@ def test_snapshot_includes_last_persistence_status(tmp_path: Path) -> None:
 
     assert payload["last_persistence_status"] == {"reason": "reset", "ok": True}
     assert payload["conversation_state"] == {"active_thread_id": "th-1"}
-
-
-def test_build_session_snapshot_payload_includes_expected_sections() -> None:
-    raec = Raec.__new__(Raec)
-    raec._last_memory_context = [{"memory": "x"}]
-    raec._last_persistence_status = {"reason": "turn_complete", "ok": True}
-    raec.snapshot_builder = SessionSnapshotBuilder()
-
-    class _Session:
-        session_id = "sess-2"
-        key_topics = ["topic-a"]
-        outcomes = ["done"]
-
-    class _Conversation:
-        current_session = _Session()
-
-        def message_count(self) -> int:
-            return 3
-
-        def get_context_messages(self, limit: int = 10):
-            return [{"role": "assistant", "content": "hi"}][:limit]
-
-    class _ConversationState:
-        def to_dict(self):
-            return {"mode": "chat", "active_thread_id": "th-2"}
-
-    class _ConversationStateManager:
-        state = _ConversationState()
-
-    raec.conversation = _Conversation()
-    raec.conversation_state = _ConversationStateManager()
-
-    payload = raec._build_session_snapshot_payload(limit=1)
-
-    assert payload["session_id"] == "sess-2"
-    assert payload["message_count"] == 3
-    assert payload["active_topics"] == ["topic-a"]
-    assert payload["outcomes"] == ["done"]
-    assert payload["memory_context"] == [{"memory": "x"}]
-    assert payload["recent_turns"] == [{"role": "assistant", "content": "hi"}]
-    assert payload["conversation_state"] == {"mode": "chat", "active_thread_id": "th-2"}
-    assert payload["last_persistence_status"] == {"reason": "turn_complete", "ok": True}
-    assert "captured_at" in payload

@@ -439,6 +439,8 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
             return self._get_help_text()
         elif '/status' in input_lower:
             return self._get_status_text()
+        elif '/reset' in input_lower:
+            return self._reset_conversation_state()
         elif '/skills' in input_lower:
             return self._get_skills_text()
         elif '/curiosity' in input_lower:
@@ -588,6 +590,7 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
 Commands:
   /help         - Show this help
   /status       - System status
+  /reset        - Reset active conversation context
   /skills       - List learned skills
   /curiosity    - Curiosity engine status
   /learned      - What I learned autonomously

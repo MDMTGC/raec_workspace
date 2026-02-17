@@ -301,42 +301,23 @@ class Raec:
 
         state_context = self.conversation_state.state.generate_prompt_context()
 
-        response, turn_mode = self._route_turn(
-            intent=intent,
-            requested_mode=mode,
-            user_input=user_input,
-            state_context=state_context,
-        )
-
-        self._finalize_turn(
-            user_input=user_input,
-            response=response,
-            turn_mode=turn_mode,
-            task_type=intent.value,
-        )
-
-        return response
-
-
-    def _route_turn(self, intent: Intent, requested_mode: str, user_input: str, state_context: str) -> tuple[str, str]:
-        """Route turn to the correct handler and return response + turn mode."""
-        route = self.turn_router.route(intent=intent, requested_mode=requested_mode)
+        # Route based on intent
+        route = self.turn_router.route(intent=intent, requested_mode=mode)
         if route.handler_name == "chat":
-            return self._handle_chat(user_input, state_context=state_context), route.turn_mode
-        if route.handler_name == "query":
-            return self._handle_query(user_input, state_context=state_context), route.turn_mode
-        if route.handler_name == "meta":
-            return self._handle_meta(user_input, state_context=state_context), route.turn_mode
+            response = self._handle_chat(user_input, state_context=state_context)
+        elif route.handler_name == "query":
+            response = self._handle_query(user_input, state_context=state_context)
+        elif route.handler_name == "meta":
+            response = self._handle_meta(user_input, state_context=state_context)
+        else:
+            response = self._handle_task(
+                user_input,
+                route.selected_mode or "standard",
+                state_context=state_context,
+            )
 
-        response = self._handle_task(
-            user_input,
-            route.selected_mode or "standard",
-            state_context=state_context,
-        )
-        return response, route.turn_mode
+        turn_mode = route.turn_mode
 
-    def _finalize_turn(self, user_input: str, response: str, turn_mode: str, task_type: str) -> None:
-        """Apply continuity, confidence, curiosity, and persistence side effects."""
         self.conversation_state.state.update_from_turn(
             user_input=user_input,
             assistant_output=response,
@@ -346,7 +327,8 @@ class Raec:
         if compressed:
             self._store_conversation_summary()
 
-        confidence = self.confidence.assess_confidence(response, task_type=task_type)
+        # Assess confidence in response
+        confidence = self.confidence.assess_confidence(response, task_type=intent.value)
         if self.confidence.should_express_uncertainty(confidence):
             print(f"   [~] Low confidence: {confidence.score:.0%}")
 
@@ -361,6 +343,8 @@ class Raec:
         self.idle_loop.record_user_activity()
         self.conversation.add_assistant_message(response)
         self._persist_runtime_state(reason="turn_complete")
+
+        return response
 
     def _handle_chat(self, user_input: str, state_context: str = "") -> str:
         """Handle casual conversation"""

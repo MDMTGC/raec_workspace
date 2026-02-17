@@ -14,6 +14,7 @@ import sys
 import os
 import yaml
 import time
+import json
 from typing import Dict, Any, List, Optional
 
 # Path Setup
@@ -49,6 +50,7 @@ from toolsmith import ToolForge
 from proactive import Notifier, NotificationType
 from context import ContextManager
 from uncertainty import ConfidenceTracker
+from observability import PromptDebugLogger
 
 
 class Raec:
@@ -192,6 +194,16 @@ class Raec:
             max_steps=self.config['planner'].get('max_steps', 10)
         )
         print("   [OK] Planner initialized")
+
+        # Observability: prompt assembly + session snapshots
+        observability_config = self.config.get('observability', {})
+        self.prompt_debug = PromptDebugLogger(
+            enabled=observability_config.get('prompt_debug', False),
+            export_dir=os.path.join(base_dir, observability_config.get('prompt_debug_dir', 'logs/prompt_debug')),
+            print_prompt=observability_config.get('echo_prompts_to_console', False),
+        )
+        self.snapshot_dir = os.path.join(base_dir, observability_config.get('session_snapshot_dir', 'logs/session_snapshots'))
+        self._last_memory_context: List[Dict[str, Any]] = []
         
         # System directive
         self.logic_directive = "You are a technical reasoning engine. Provide objective analysis."
@@ -338,7 +350,18 @@ User: {user_input}
 Reply in first person ("I", "my"). Be conversational, concise, and direct. No narration, no third-person.
 {style_hint}
 """
-        return self.llm.generate(prompt, temperature=0.7, max_tokens=256)
+        return self._generate_with_debug(
+            source="chat",
+            prompt=prompt,
+            temperature=0.7,
+            max_tokens=256,
+            task_type=TaskType.SYNTHESIS,
+            components={
+                "user_input": user_input,
+                "history_count": len(recent_messages[:-1]),
+                "has_style_hint": bool(style_hint),
+            },
+        )
 
     def _handle_query(self, user_input: str) -> str:
         """Handle information requests"""
@@ -346,6 +369,7 @@ Reply in first person ("I", "my"). Be conversational, concise, and direct. No na
 
         # Check memory for relevant facts
         relevant_memories = self.memory.query(user_input, k=3)
+        self._last_memory_context = relevant_memories
         memory_context = ""
         if relevant_memories:
             memory_context = "\nRelevant knowledge:\n" + "\n".join([
@@ -359,7 +383,17 @@ Question: {user_input}
 
 Answer in first person ("I", "my"). Be direct and concise. No narration or third-person.
 """
-        response = self.llm.generate(prompt, temperature=0.5, max_tokens=512)
+        response = self._generate_with_debug(
+            source="query",
+            prompt=prompt,
+            temperature=0.5,
+            max_tokens=512,
+            task_type=TaskType.REASONING,
+            components={
+                "user_input": user_input,
+                "memory_hits": len(relevant_memories),
+            },
+        )
 
         # Track topic
         self.conversation.add_topic(user_input[:50])
@@ -397,6 +431,9 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
             return self.notifier.format_pending()
         elif '/confidence' in input_lower or '/calibration' in input_lower:
             return self.confidence.format_calibration_report()
+        elif '/snapshot' in input_lower:
+            snapshot_path = self._create_session_snapshot()
+            return f"Session snapshot saved: {snapshot_path}"
         elif 'who are you' in input_lower or 'what are you' in input_lower:
             return self._get_identity_text()
         elif 'what can you do' in input_lower:
@@ -410,7 +447,14 @@ The user is asking about me: {user_input}
 
 Answer in first person about my capabilities, identity, or status. Be direct. No third-person narration.
 """
-            return self.llm.generate(prompt, temperature=0.5, max_tokens=256)
+            return self._generate_with_debug(
+                source="meta",
+                prompt=prompt,
+                temperature=0.5,
+                max_tokens=256,
+                task_type=TaskType.SYNTHESIS,
+                components={"user_input": user_input},
+            )
 
     def _handle_task(self, task: str, mode: str) -> str:
         """Handle action/execution requests"""
@@ -442,7 +486,66 @@ Steps executed:
 Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" or "Completed:". No narration.
 """
 
-        return self.llm.generate(synthesis_prompt, temperature=0.5, max_tokens=256)
+        return self._generate_with_debug(
+            source="task_synthesis",
+            prompt=synthesis_prompt,
+            temperature=0.5,
+            max_tokens=256,
+            task_type=TaskType.SYNTHESIS,
+            components={
+                "task": task,
+                "steps_completed": len(steps_completed),
+            },
+        )
+
+    def _generate_with_debug(
+        self,
+        source: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        task_type: TaskType,
+        components: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Generate an LLM response while logging assembled prompt components."""
+        self.prompt_debug.log(
+            source=source,
+            prompt=prompt,
+            metadata={
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "task_type": task_type.value,
+                "components": components or {},
+            },
+        )
+        return self.llm.generate(
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            task_type=task_type,
+        )
+
+    def _create_session_snapshot(self, limit: int = 10) -> str:
+        """Dump current session state, memory context, and recent turns to disk."""
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+        timestamp_ms = int(time.time() * 1000)
+        session_id = self.conversation.current_session.session_id
+        output_path = os.path.join(self.snapshot_dir, f"snapshot_{session_id}_{timestamp_ms}.json")
+
+        snapshot = {
+            "session_id": session_id,
+            "message_count": self.conversation.message_count(),
+            "active_topics": list(self.conversation.current_session.key_topics),
+            "outcomes": list(self.conversation.current_session.outcomes),
+            "memory_context": self._last_memory_context,
+            "recent_turns": self.conversation.get_context_messages(limit=limit),
+            "captured_at": time.time(),
+        }
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+
+        return output_path
 
     def _get_help_text(self) -> str:
         """Return help text"""
@@ -462,6 +565,7 @@ Commands:
   /tools        - Generated tools
   /notifications- Pending notifications
   /confidence   - Calibration report
+  /snapshot     - Write session + memory context snapshot
 
 Modes:
   standard      - Normal planning and execution

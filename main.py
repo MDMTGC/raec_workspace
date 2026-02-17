@@ -34,7 +34,12 @@ from raec_core.core_rules import CoreRulesEngine
 
 # Identity and conversation systems
 from identity import SelfModel
-from conversation import ConversationManager, IntentClassifier, Intent
+from conversation import (
+    ConversationManager,
+    IntentClassifier,
+    Intent,
+    ConversationStateManager,
+)
 
 # Web access (transparent, logged)
 from web import WebFetcher, WebSearch, ActivityLog
@@ -133,6 +138,13 @@ class Raec:
         conv_path = os.path.join(base_dir, "conversation/conversation_state.json")
         self.conversation = ConversationManager(state_path=conv_path)
         print(f"   [OK] Conversation manager active (session: {self.conversation.current_session.session_id})")
+
+        conv_state_path = os.path.join(base_dir, "conversation/conversation_state_manager.json")
+        self.conversation_state = ConversationStateManager(
+            state_path=conv_state_path,
+            session_id=self.conversation.current_session.session_id,
+        )
+        print("   [OK] Conversation state manager active")
 
         # Intent classifier (routing)
         self.intent_classifier = IntentClassifier()
@@ -282,15 +294,29 @@ class Raec:
         if ctx.user_state.urgency.value > 2:
             print(f"   [!] Urgency detected: {ctx.user_state.urgency.name}")
 
+        state_context = self.conversation_state.state.generate_prompt_context()
+
         # Route based on intent
         if intent == Intent.CHAT:
-            response = self._handle_chat(user_input)
+            response = self._handle_chat(user_input, state_context=state_context)
+            turn_mode = "chat"
         elif intent == Intent.QUERY:
-            response = self._handle_query(user_input)
+            response = self._handle_query(user_input, state_context=state_context)
+            turn_mode = "analysis"
         elif intent == Intent.META:
-            response = self._handle_meta(user_input)
+            response = self._handle_meta(user_input, state_context=state_context)
+            turn_mode = "meta"
         else:  # Intent.TASK
-            response = self._handle_task(user_input, mode if mode != "auto" else "standard")
+            selected_mode = mode if mode != "auto" else "standard"
+            response = self._handle_task(user_input, selected_mode, state_context=state_context)
+            turn_mode = "task"
+
+        self.conversation_state.state.update_from_turn(
+            user_input=user_input,
+            assistant_output=response,
+            mode=turn_mode,
+        )
+        self.conversation_state.state.compress_history(max_recent_turns=6)
 
         # Assess confidence in response
         confidence = self.confidence.assess_confidence(response, task_type=intent.value)
@@ -312,11 +338,12 @@ class Raec:
         # Track response
         self.conversation.add_assistant_message(response)
         self.conversation.save()
+        self.conversation_state.save()
         self.identity.save()
 
         return response
 
-    def _handle_chat(self, user_input: str) -> str:
+    def _handle_chat(self, user_input: str, state_context: str = "") -> str:
         """Handle casual conversation"""
         identity_context = self.identity.get_system_prompt_context()
         recent_messages = self.conversation.get_context_messages(limit=5)
@@ -342,6 +369,8 @@ class Raec:
 
 {pref_context}
 
+{state_context}
+
 Recent conversation:
 {conv_context}
 
@@ -363,7 +392,7 @@ Reply in first person ("I", "my"). Be conversational, concise, and direct. No na
             },
         )
 
-    def _handle_query(self, user_input: str) -> str:
+    def _handle_query(self, user_input: str, state_context: str = "") -> str:
         """Handle information requests"""
         identity_context = self.identity.get_system_prompt_context()
 
@@ -377,6 +406,7 @@ Reply in first person ("I", "my"). Be conversational, concise, and direct. No na
             ])
 
         prompt = f"""{identity_context}
+{state_context}
 {memory_context}
 
 Question: {user_input}
@@ -400,7 +430,7 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
 
         return response
 
-    def _handle_meta(self, user_input: str) -> str:
+    def _handle_meta(self, user_input: str, state_context: str = "") -> str:
         """Handle system commands about RAEC"""
         input_lower = user_input.lower()
 
@@ -443,6 +473,8 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
             identity_context = self.identity.get_system_prompt_context()
             prompt = f"""{identity_context}
 
+{state_context}
+
 The user is asking about me: {user_input}
 
 Answer in first person about my capabilities, identity, or status. Be direct. No third-person narration.
@@ -456,7 +488,7 @@ Answer in first person about my capabilities, identity, or status. Be direct. No
                 components={"user_input": user_input},
             )
 
-    def _handle_task(self, task: str, mode: str) -> str:
+    def _handle_task(self, task: str, mode: str, state_context: str = "") -> str:
         """Handle action/execution requests"""
         # Execute with specified mode
         full_task = f"{self.logic_directive}\n\nTask: {task}"
@@ -477,6 +509,8 @@ Answer in first person about my capabilities, identity, or status. Be direct. No
 
         identity_context = self.identity.get_system_prompt_context()
         synthesis_prompt = f"""{identity_context}
+
+{state_context}
 
 Task requested: {task}
 Status: COMPLETED SUCCESSFULLY

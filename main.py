@@ -14,6 +14,7 @@ import sys
 import os
 import yaml
 import time
+import json
 from typing import Dict, Any, List, Optional
 
 # Path Setup
@@ -33,7 +34,12 @@ from raec_core.core_rules import CoreRulesEngine
 
 # Identity and conversation systems
 from identity import SelfModel
-from conversation import ConversationManager, IntentClassifier, Intent
+from conversation import (
+    ConversationManager,
+    IntentClassifier,
+    Intent,
+    ConversationStateManager,
+)
 
 # Web access (transparent, logged)
 from web import WebFetcher, WebSearch, ActivityLog
@@ -49,6 +55,8 @@ from toolsmith import ToolForge
 from proactive import Notifier, NotificationType
 from context import ContextManager
 from uncertainty import ConfidenceTracker
+from observability import PromptDebugLogger
+from runtime import SessionPersistenceCoordinator, TurnRouter
 
 
 class Raec:
@@ -132,6 +140,13 @@ class Raec:
         self.conversation = ConversationManager(state_path=conv_path)
         print(f"   [OK] Conversation manager active (session: {self.conversation.current_session.session_id})")
 
+        conv_state_path = os.path.join(base_dir, "conversation/conversation_state_manager.json")
+        self.conversation_state = ConversationStateManager(
+            state_path=conv_state_path,
+            session_id=self.conversation.current_session.session_id,
+        )
+        print("   [OK] Conversation state manager active")
+
         # Intent classifier (routing)
         self.intent_classifier = IntentClassifier()
         print("   [OK] Intent classifier ready")
@@ -192,6 +207,19 @@ class Raec:
             max_steps=self.config['planner'].get('max_steps', 10)
         )
         print("   [OK] Planner initialized")
+
+        # Observability: prompt assembly + session snapshots
+        observability_config = self.config.get('observability', {})
+        self.prompt_debug = PromptDebugLogger(
+            enabled=observability_config.get('prompt_debug', False),
+            export_dir=os.path.join(base_dir, observability_config.get('prompt_debug_dir', 'logs/prompt_debug')),
+            print_prompt=observability_config.get('echo_prompts_to_console', False),
+        )
+        self.snapshot_dir = os.path.join(base_dir, observability_config.get('session_snapshot_dir', 'logs/session_snapshots'))
+        self._last_memory_context: List[Dict[str, Any]] = []
+        self._last_stored_rolling_summary = ""
+        self.persistence = SessionPersistenceCoordinator()
+        self.turn_router = TurnRouter()
         
         # System directive
         self.logic_directive = "You are a technical reasoning engine. Provide objective analysis."
@@ -270,15 +298,33 @@ class Raec:
         if ctx.user_state.urgency.value > 2:
             print(f"   [!] Urgency detected: {ctx.user_state.urgency.name}")
 
+        state_context = self.conversation_state.state.generate_prompt_context()
+
         # Route based on intent
-        if intent == Intent.CHAT:
-            response = self._handle_chat(user_input)
-        elif intent == Intent.QUERY:
-            response = self._handle_query(user_input)
-        elif intent == Intent.META:
-            response = self._handle_meta(user_input)
-        else:  # Intent.TASK
-            response = self._handle_task(user_input, mode if mode != "auto" else "standard")
+        route = self.turn_router.route(intent=intent, requested_mode=mode)
+        if route.handler_name == "chat":
+            response = self._handle_chat(user_input, state_context=state_context)
+        elif route.handler_name == "query":
+            response = self._handle_query(user_input, state_context=state_context)
+        elif route.handler_name == "meta":
+            response = self._handle_meta(user_input, state_context=state_context)
+        else:
+            response = self._handle_task(
+                user_input,
+                route.selected_mode or "standard",
+                state_context=state_context,
+            )
+
+        turn_mode = route.turn_mode
+
+        self.conversation_state.state.update_from_turn(
+            user_input=user_input,
+            assistant_output=response,
+            mode=turn_mode,
+        )
+        compressed = self.conversation_state.state.compress_history(max_recent_turns=6)
+        if compressed:
+            self._store_conversation_summary()
 
         # Assess confidence in response
         confidence = self.confidence.assess_confidence(response, task_type=intent.value)
@@ -299,12 +345,11 @@ class Raec:
 
         # Track response
         self.conversation.add_assistant_message(response)
-        self.conversation.save()
-        self.identity.save()
+        self._persist_runtime_state(reason="turn_complete")
 
         return response
 
-    def _handle_chat(self, user_input: str) -> str:
+    def _handle_chat(self, user_input: str, state_context: str = "") -> str:
         """Handle casual conversation"""
         identity_context = self.identity.get_system_prompt_context()
         recent_messages = self.conversation.get_context_messages(limit=5)
@@ -330,6 +375,8 @@ class Raec:
 
 {pref_context}
 
+{state_context}
+
 Recent conversation:
 {conv_context}
 
@@ -338,14 +385,26 @@ User: {user_input}
 Reply in first person ("I", "my"). Be conversational, concise, and direct. No narration, no third-person.
 {style_hint}
 """
-        return self.llm.generate(prompt, temperature=0.7, max_tokens=256)
+        return self._generate_with_debug(
+            source="chat",
+            prompt=prompt,
+            temperature=0.7,
+            max_tokens=256,
+            task_type=TaskType.SYNTHESIS,
+            components={
+                "user_input": user_input,
+                "history_count": len(recent_messages[:-1]),
+                "has_style_hint": bool(style_hint),
+            },
+        )
 
-    def _handle_query(self, user_input: str) -> str:
+    def _handle_query(self, user_input: str, state_context: str = "") -> str:
         """Handle information requests"""
         identity_context = self.identity.get_system_prompt_context()
 
         # Check memory for relevant facts
         relevant_memories = self.memory.query(user_input, k=3)
+        self._last_memory_context = relevant_memories
         memory_context = ""
         if relevant_memories:
             memory_context = "\nRelevant knowledge:\n" + "\n".join([
@@ -353,20 +412,31 @@ Reply in first person ("I", "my"). Be conversational, concise, and direct. No na
             ])
 
         prompt = f"""{identity_context}
+{state_context}
 {memory_context}
 
 Question: {user_input}
 
 Answer in first person ("I", "my"). Be direct and concise. No narration or third-person.
 """
-        response = self.llm.generate(prompt, temperature=0.5, max_tokens=512)
+        response = self._generate_with_debug(
+            source="query",
+            prompt=prompt,
+            temperature=0.5,
+            max_tokens=512,
+            task_type=TaskType.REASONING,
+            components={
+                "user_input": user_input,
+                "memory_hits": len(relevant_memories),
+            },
+        )
 
         # Track topic
         self.conversation.add_topic(user_input[:50])
 
         return response
 
-    def _handle_meta(self, user_input: str) -> str:
+    def _handle_meta(self, user_input: str, state_context: str = "") -> str:
         """Handle system commands about RAEC"""
         input_lower = user_input.lower()
 
@@ -375,6 +445,8 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
             return self._get_help_text()
         elif '/status' in input_lower:
             return self._get_status_text()
+        elif '/reset' in input_lower:
+            return self._reset_conversation_state()
         elif '/skills' in input_lower:
             return self._get_skills_text()
         elif '/curiosity' in input_lower:
@@ -397,6 +469,9 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
             return self.notifier.format_pending()
         elif '/confidence' in input_lower or '/calibration' in input_lower:
             return self.confidence.format_calibration_report()
+        elif '/snapshot' in input_lower:
+            snapshot_path = self._create_session_snapshot()
+            return f"Session snapshot saved: {snapshot_path}"
         elif 'who are you' in input_lower or 'what are you' in input_lower:
             return self._get_identity_text()
         elif 'what can you do' in input_lower:
@@ -406,13 +481,22 @@ Answer in first person ("I", "my"). Be direct and concise. No narration or third
             identity_context = self.identity.get_system_prompt_context()
             prompt = f"""{identity_context}
 
+{state_context}
+
 The user is asking about me: {user_input}
 
 Answer in first person about my capabilities, identity, or status. Be direct. No third-person narration.
 """
-            return self.llm.generate(prompt, temperature=0.5, max_tokens=256)
+            return self._generate_with_debug(
+                source="meta",
+                prompt=prompt,
+                temperature=0.5,
+                max_tokens=256,
+                task_type=TaskType.SYNTHESIS,
+                components={"user_input": user_input},
+            )
 
-    def _handle_task(self, task: str, mode: str) -> str:
+    def _handle_task(self, task: str, mode: str, state_context: str = "") -> str:
         """Handle action/execution requests"""
         # Execute with specified mode
         full_task = f"{self.logic_directive}\n\nTask: {task}"
@@ -434,6 +518,8 @@ Answer in first person about my capabilities, identity, or status. Be direct. No
         identity_context = self.identity.get_system_prompt_context()
         synthesis_prompt = f"""{identity_context}
 
+{state_context}
+
 Task requested: {task}
 Status: COMPLETED SUCCESSFULLY
 Steps executed:
@@ -442,7 +528,108 @@ Steps executed:
 Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" or "Completed:". No narration.
 """
 
-        return self.llm.generate(synthesis_prompt, temperature=0.5, max_tokens=256)
+        return self._generate_with_debug(
+            source="task_synthesis",
+            prompt=synthesis_prompt,
+            temperature=0.5,
+            max_tokens=256,
+            task_type=TaskType.SYNTHESIS,
+            components={
+                "task": task,
+                "steps_completed": len(steps_completed),
+            },
+        )
+
+    def _generate_with_debug(
+        self,
+        source: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        task_type: TaskType,
+        components: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Generate an LLM response while logging assembled prompt components."""
+        self.prompt_debug.log(
+            source=source,
+            prompt=prompt,
+            metadata={
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "task_type": task_type.value,
+                "components": components or {},
+            },
+        )
+        return self.llm.generate(
+            prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            task_type=task_type,
+        )
+
+    def _create_session_snapshot(self, limit: int = 10) -> str:
+        """Dump current session state, memory context, and recent turns to disk."""
+        os.makedirs(self.snapshot_dir, exist_ok=True)
+        timestamp_ms = int(time.time() * 1000)
+        session_id = self.conversation.current_session.session_id
+        output_path = os.path.join(self.snapshot_dir, f"snapshot_{session_id}_{timestamp_ms}.json")
+
+        snapshot = {
+            "session_id": session_id,
+            "message_count": self.conversation.message_count(),
+            "active_topics": list(self.conversation.current_session.key_topics),
+            "outcomes": list(self.conversation.current_session.outcomes),
+            "memory_context": self._last_memory_context,
+            "recent_turns": self.conversation.get_context_messages(limit=limit),
+            "conversation_state": self.conversation_state.state.to_dict(),
+            "captured_at": time.time(),
+        }
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+
+        return output_path
+
+
+    def _persist_runtime_state(self, reason: str) -> None:
+        """Persist conversation/identity state in deterministic order."""
+        result = self.persistence.persist(
+            conversation=self.conversation,
+            conversation_state=self.conversation_state,
+            identity=self.identity,
+        )
+        if not result.ok:
+            print(f"   [!] Persistence warning ({reason}): {result.failures}")
+
+    def _store_conversation_summary(self) -> None:
+        """Store rolling conversation summary in memory when it changes."""
+        summary = self.conversation_state.state.rolling_summary.strip()
+        if not summary or summary == self._last_stored_rolling_summary:
+            return
+
+        self.memory.store(
+            content=summary[-2000:],
+            memory_type=MemoryType.SUMMARY,
+            metadata={
+                "session_id": self.conversation.current_session.session_id,
+                "thread_id": self.conversation_state.state.active_thread_id,
+                "mode": self.conversation_state.state.mode,
+            },
+            source="conversation_state",
+        )
+        self._last_stored_rolling_summary = summary
+
+    def _reset_conversation_state(self) -> str:
+        """Reset session conversation context and state manager thread state."""
+        self.conversation.clear_history()
+        self.conversation_state.state.reset(keep_rolling_summary=False)
+        self._last_memory_context = []
+        self._last_stored_rolling_summary = ""
+        self.persistence = SessionPersistenceCoordinator()
+        self.turn_router = TurnRouter()
+        self.conversation.save()
+        self.conversation_state.save()
+        return "Conversation context reset for this session."
 
     def _get_help_text(self) -> str:
         """Return help text"""
@@ -451,6 +638,7 @@ Confirm in first person what I accomplished (1-2 sentences). Start with "Done:" 
 Commands:
   /help         - Show this help
   /status       - System status
+  /reset        - Reset active conversation context
   /skills       - List learned skills
   /curiosity    - Curiosity engine status
   /learned      - What I learned autonomously
@@ -462,6 +650,7 @@ Commands:
   /tools        - Generated tools
   /notifications- Pending notifications
   /confidence   - Calibration report
+  /snapshot     - Write session + memory context snapshot
 
 Modes:
   standard      - Normal planning and execution
@@ -1308,8 +1497,7 @@ If nothing notable, respond with "No significant insight."
         self.context.reset_session()
 
         # Save all state
-        self.identity.save()
-        self.conversation.save()
+        self._persist_runtime_state(reason="shutdown")
         self.memory.close()
 
         print("\n[OK] Raec system shutdown complete (state saved)")

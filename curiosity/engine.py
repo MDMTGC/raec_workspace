@@ -127,7 +127,7 @@ class CuriosityEngine:
         """Extract a searchable question from an uncertain response"""
         if not self.llm:
             # Fallback: use the user input as the question
-            return f"What is the current/accurate information about: {user_input[:100]}?"
+            return self._normalize_research_question(f"What is the current/accurate information about: {user_input[:100]}?")
 
         prompt = f"""RAEC gave an uncertain response. Extract a clear, searchable question.
 
@@ -139,12 +139,12 @@ What specific question should be researched to resolve this uncertainty?
 Respond with just the question, nothing else. Make it specific and searchable."""
 
         question = self.llm.generate(prompt, temperature=0.3, max_tokens=100)
-        return question.strip() if question else None
+        return self._normalize_research_question(question)
 
     def _extract_gap_question(self, response: str, user_input: str) -> Optional[str]:
         """Extract a question from a knowledge gap"""
         if not self.llm:
-            return f"What information exists about: {user_input[:100]}?"
+            return self._normalize_research_question(f"What information exists about: {user_input[:100]}?")
 
         prompt = f"""RAEC identified a knowledge gap. Extract a clear question to fill it.
 
@@ -156,7 +156,27 @@ What specific question should be researched to fill this knowledge gap?
 Respond with just the question, nothing else."""
 
         question = self.llm.generate(prompt, temperature=0.3, max_tokens=100)
-        return question.strip() if question else None
+        return self._normalize_research_question(question)
+
+    def _normalize_research_question(self, text: Optional[str]) -> Optional[str]:
+        """Normalize extracted questions to deterministic, searchable strings."""
+        if not text:
+            return None
+
+        candidate = " ".join(text.strip().split())
+        candidate = candidate.strip("\"'` ")
+
+        if not candidate:
+            return None
+
+        if "?" in candidate:
+            candidate = candidate.split("?", 1)[0].strip() + "?"
+        elif not candidate.lower().startswith(("what", "how", "why", "when", "where", "who", "which")):
+            candidate = f"What is the latest information about {candidate}?"
+        else:
+            candidate = f"{candidate}?"
+
+        return candidate[:240]
 
     def notice_tangent(
         self,
@@ -359,11 +379,11 @@ Respond with just the questions, one per line."""
 
         response = self.llm.generate(prompt, temperature=0.7, max_tokens=200)
 
-        questions = [
-            q.strip().lstrip('0123456789.-) ')
-            for q in response.split('\n')
-            if q.strip() and '?' in q
-        ]
+        questions: List[str] = []
+        for line in response.split('\n'):
+            cleaned = self._normalize_research_question(line.lstrip('0123456789.-) '))
+            if cleaned:
+                questions.append(cleaned)
 
         return questions[:3]
 

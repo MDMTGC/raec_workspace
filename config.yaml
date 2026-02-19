@@ -20,3 +20,11 @@ skills:
 logs:
   tasks: logs/tasks/
   memory: logs/memory_snapshots/
+
+observability:
+  prompt_debug: false
+  prompt_debug_dir: logs/prompt_debug
+  echo_prompts_to_console: false
+  session_snapshot_dir: logs/session_snapshots
+
+  prompt_budget_warn_tokens: 6000

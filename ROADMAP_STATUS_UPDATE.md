@@ -19,29 +19,33 @@ Record current verified wiring status, identify active bugs/gaps, and define the
    - Previously, `/reset` would clear conversation state and then immediately re-add the reset turn through normal finalization, undermining the reset semantics.
    - Mitigation: short-circuit turn finalization after `/reset` meta execution.
 
-2. **Error visibility gap on state-manager load failures (fixed)**
-   - `ConversationStateManager._load_or_create(...)` now records `last_load_error` and emits warning output on malformed/unreadable state files while falling back safely.
+2. **Error visibility gap on state-manager load failures (open)**
+   - `ConversationStateManager._load_or_create(...)` currently swallows exceptions silently.
+   - Impact: state corruption/reload issues are hard to diagnose.
 
-3. **Cross-subsystem integration depth still shallow (partially addressed)**
-   - Existing integration tests use lightweight stubs around `Raec.__new__` for orchestration boundaries, and a real persisted roundtrip integration test has been added for `ConversationManager` + `ConversationStateManager` + `SelfModel` with `SessionPersistenceCoordinator`.
-   - Remaining gap: add full `Raec` runtime end-to-end flow coverage once model/tool external dependencies are isolated for deterministic tests.
+3. **Cross-subsystem integration depth still shallow (open)**
+   - Existing integration tests use lightweight stubs around `Raec.__new__` and validate orchestration boundaries, but not full real-subsystem integration with persisted artifacts in one end-to-end flow.
 
 ## Updated Next Steps (Priority Order)
 
-1. **P1: Expand integration realism**
+1. **P0: Add state-load failure visibility**
+   - Add structured warning/log capture when conversation state JSON load fails.
+   - Add tests for malformed state file behavior.
+
+2. **P1: Expand integration realism**
    - Add a bounded end-to-end test that exercises real `ConversationManager` + `ConversationStateManager` save/reload sequence around turn processing.
 
-2. **P1: Add snapshot contract checks**
+3. **P1: Add snapshot contract checks**
    - Validate snapshot schema stability (required keys/types) to avoid tooling regressions.
 
-3. **P2: Context-budget instrumentation**
+4. **P2: Context-budget instrumentation**
    - Add prompt-component size accounting into observability output (identity/memory/state/history breakdown).
 
-4. **P2: Curiosity refinement continuation**
+5. **P2: Curiosity refinement continuation**
    - Add investigation success/failure taxonomy metrics and expose in curiosity status output.
 
 ## Completion Criteria for Next Milestone
 
 - State load failures are diagnosable from logs/snapshots.
-- At least one real persisted end-to-end turn lifecycle test passes. ✅
+- At least one real persisted end-to-end turn lifecycle test passes.
 - Snapshot schema has explicit regression checks.

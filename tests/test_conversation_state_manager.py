@@ -109,17 +109,3 @@ def test_state_reset_clears_active_context(tmp_path: Path):
     assert manager.state.last_commitments == []
     assert manager.state.recent_turns == []
     assert manager.state.rolling_summary == ""
-
-
-def test_state_manager_reports_load_error_on_malformed_json(tmp_path: Path, capsys) -> None:
-    state_path = tmp_path / "conversation_state.json"
-    state_path.write_text("{not-json", encoding="utf-8")
-
-    manager = ConversationStateManager(state_path=str(state_path), session_id="sess-malformed")
-
-    assert manager.state.session_id == "sess-malformed"
-    assert manager.last_load_error is not None
-    assert "Failed to load conversation state" in manager.last_load_error
-
-    captured = capsys.readouterr()
-    assert "Failed to load conversation state" in captured.out

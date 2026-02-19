@@ -176,7 +176,6 @@ class ConversationStateManager:
 
     def __init__(self, state_path: str, session_id: str):
         self.state_path = state_path
-        self.last_load_error: Optional[str] = None
         self.state = self._load_or_create(session_id=session_id)
 
     def _load_or_create(self, session_id: str) -> ConversationState:
@@ -188,9 +187,8 @@ class ConversationStateManager:
                 if state.session_id != session_id:
                     state.session_id = session_id
                 return state
-            except Exception as exc:
-                self.last_load_error = f"Failed to load conversation state from {self.state_path}: {exc}"
-                print(f"[!] {self.last_load_error}")
+            except Exception:
+                pass
         return ConversationState(session_id=session_id)
 
     def save(self) -> None:
